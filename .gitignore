@@ -1,0 +1,11 @@
+# ビルド成果物
+bin/
+obj/
+.vs/
+*.user
+
+# 実行結果 (PC 名やデバイスのシリアル番号を含むためコミットしない)
+usbinfo_sample.txt
+result*.txt
+result*.json
+summary*.csv
