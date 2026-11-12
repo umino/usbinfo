@@ -25,11 +25,19 @@ usbinfo [options]
 
 | オプション | 意味 |
 |---|---|
-| `-f`, `--format text\|json\|csv` | 出力形式。既定は `text`。`csv` はディスク 1 台 1 行の比較表 (`summary`) だけを出力する |
+| `-f`, `--format FORMAT` | 出力形式。既定は `text`。下の表を参照 |
 | `-o`, `--out FILE` | 標準出力の代わりに FILE へ書き出す。CSV のときは Excel で開けるよう BOM を付ける |
 | `--no-wmi` | WMI の問い合わせを省略する (実行が速くなる) |
 | `--no-props` | devnode の全プロパティダンプ (`allProperties`) を省略する |
 | `-h`, `--help` | ヘルプを表示する |
+
+| FORMAT | 内容 |
+|---|---|
+| `text` | 全情報をインデント付きテキストで出力する |
+| `json` | `text` と同じ内容の JSON |
+| `csv` | ディスク 1 台 1 行の比較表 (`summary`) だけを出力する |
+| `lsusb` | USB デバイスを 1 台 1 行で一覧する (Linux の `lsusb` 風) |
+| `lsusb-tree` | USB の接続ツリーを表示する (Linux の `lsusb -tv` 風) |
 
 例:
 
@@ -37,7 +45,48 @@ usbinfo [options]
 usbinfo -f text -o result.txt     全情報
 usbinfo -f json -o result.json    同じ内容の JSON
 usbinfo -f csv  -o summary.csv    比較表のみ
+usbinfo -f lsusb                  USB デバイスの一覧
+usbinfo -f lsusb-tree             USB の接続ツリー
 ```
+
+## lsusb 風の表示
+
+`-f lsusb` は USB デバイスを 1 台 1 行で表示します。ルートハブと外付けハブも含みます。
+
+```
+Bus 001 Device 001: ID 8086:7a60 USB ルート ハブ (USB 3.0)
+Bus 001 Device 002: ID 046d:c534 Logitech USB Receiver
+Bus 001 Device 004: ID 05e3:0608 USB2.0 Hub
+```
+
+`-f lsusb-tree` はハブとポートの接続関係をツリーで表示します。
+
+```
+/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=USBHUB3/26p
+    ID 8086:7a60 USB ルート ハブ (USB 3.0)
+    |__ Port 005: Dev 002, Class=HID, Driver=usbccgp, 12M
+        ID 046d:c534 Logitech USB Receiver
+    |__ Port 011: Dev 004, Class=Hub, Driver=USBHUB3/4p, 480M
+        ID 05e3:0608 USB2.0 Hub
+```
+
+| 項目 | 意味 |
+|---|---|
+| `Bus` | ルートハブごとに振った連番。Windows にはバス番号がないため、ルートハブのインスタンス ID 順に 1 から付けている |
+| `Device` / `Dev` | USB デバイスアドレス。ルートハブは 001 固定 |
+| `ID` | ベンダー ID : プロダクト ID。ルートハブはホストコントローラーの ID |
+| 名前 | 文字列ディスクリプタの製造元 + 製品名。読めないときはデバイスマネージャー上の名前 |
+| `Port` | 親ハブ上のポート番号 |
+| `Class` | デバイスクラス。インターフェイスごとに定義されている機器は、インターフェイスクラスを列挙する |
+| `Driver` | 割り当てられたドライバーサービス名。ハブは `/Np` でポート数を付ける |
+| 速度 | 現在の接続速度 (`1.5M` / `12M` / `480M` / `5000M` / `10000M`) |
+
+Linux の `lsusb` との違い:
+
+- 名前は機器自身が持つ文字列で、`usb.ids` データベースは引いていません。
+- xHCI では USB 2.0 と 3.x が 1 つのルートハブにまとまるため、バスは速度別に分かれません。
+- Windows のデバイスアドレスは 1 から始まることがあり、ルートハブの 001 と重複する場合があります。
+- ツリーはデバイス単位の表示で、インターフェイスごとの行 (`If N`) は出しません。
 
 出力には PC 名やデバイスのシリアル番号が含まれます。共有するときは注意してください。
 

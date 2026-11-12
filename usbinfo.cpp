@@ -29,6 +29,7 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
+#include <cwctype>
 #include <list>
 #include <map>
 #include <string>
@@ -616,6 +617,9 @@ struct UsbBrief {
     ULONG port = 0;
     int capRemovable = -1, capUniqueId = -1, inLocalMachineContainer = -1;
     int portUserConnectable = -1, portTypeC = -1, hubNonRemovableBit = -1;
+    USHORT vid = 0, pid = 0, deviceAddress = 0;
+    BYTE deviceClass = 0;
+    std::vector<BYTE> interfaceClasses;   // 代替設定 0 のインターフェイスクラス (重複なし)
 };
 
 static std::wstring tri(int v) { return v < 0 ? L"(n/a)" : (v ? L"true" : L"false"); }
@@ -653,8 +657,9 @@ static std::wstring usbGetString(HANDLE hub, ULONG port, BYTE index, USHORT lang
 }
 
 static void parseConfigDescriptor(const std::vector<BYTE>& cfg, HANDLE hub, ULONG port, USHORT lang,
-                                  Node& out, std::wstring& ifaceSummary)
+                                  Node& out, UsbBrief& brief)
 {
+    std::wstring& ifaceSummary = brief.interfaces;
     Node& list = out.arr(L"descriptors");
     size_t pos = 0;
     while (pos + 2 <= cfg.size()) {
@@ -689,6 +694,8 @@ static void parseConfigDescriptor(const std::vector<BYTE>& cfg, HANDLE hub, ULON
                 if (d[5] == 0x08) desc += L" " + massStorageDetail(d[6], d[7]);
                 e.str(L"classDescription", desc);
                 if (d[8]) e.str(L"iInterface", usbGetString(hub, port, d[8], lang));
+                if (d[3] == 0 && std::find(brief.interfaceClasses.begin(), brief.interfaceClasses.end(), d[5]) == brief.interfaceClasses.end())
+                    brief.interfaceClasses.push_back(d[5]);
                 if (!ifaceSummary.empty()) ifaceSummary += L"; ";
                 ifaceSummary += fmt(L"if%u.alt%u=%02X/%02X/%02X %s", d[2], d[3], d[5], d[6], d[7], desc.c_str());
             }
@@ -791,6 +798,10 @@ static void usbInfo(DEVINST dev, Node& out, UsbBrief& brief)
         return;
     }
     brief.valid = true;
+    brief.deviceAddress = ci->DeviceAddress;
+    brief.vid = ci->DeviceDescriptor.idVendor;
+    brief.pid = ci->DeviceDescriptor.idProduct;
+    brief.deviceClass = ci->DeviceDescriptor.bDeviceClass;
     static const wchar_t* speeds[] = { L"Low", L"Full", L"High", L"Super" };
     std::wstring speed = ci->Speed < _countof(speeds) ? speeds[ci->Speed] : L"?";
     {
@@ -872,7 +883,7 @@ static void usbInfo(DEVINST dev, Node& out, UsbBrief& brief)
         if (usbGetDescriptor(hub, port, USB_CONFIGURATION_DESCRIPTOR_TYPE, 0, 0, 9, head, &e) && head.size() >= 4) {
             USHORT total = (USHORT)(head[2] | (head[3] << 8));
             if (usbGetDescriptor(hub, port, USB_CONFIGURATION_DESCRIPTOR_TYPE, 0, 0, total, cfg, &e))
-                parseConfigDescriptor(cfg, hub, port, lang, n, brief.interfaces);
+                parseConfigDescriptor(cfg, hub, port, lang, n, brief);
             else n.err(L"getConfigDescriptor", e);
         } else n.err(L"getConfigDescriptor", e);
     }
@@ -1411,6 +1422,177 @@ static void processDisk(const std::wstring& ifPath, bool isCdrom, const Options&
 }
 
 // ---------------------------------------------------------------------------
+// lsusb 風の表示
+// ---------------------------------------------------------------------------
+
+struct LsEntry {
+    int bus = 0, depth = 0;
+    ULONG port = 0, hubPorts = 0;
+    USHORT dev = 0, vid = 0, pid = 0;
+    bool isHub = false;
+    std::wstring name, cls, driver, speed;
+};
+
+// "VID_046D" / "VID8086" のような表記から 16 進 4 桁を取り出す
+static bool parseIdAfter(std::wstring s, const wchar_t* tag, USHORT& out)
+{
+    for (wchar_t& c : s) c = (wchar_t)towupper(c);
+    size_t p = s.find(tag);
+    if (p == std::wstring::npos) return false;
+    p += wcslen(tag);
+    if (p < s.size() && s[p] == L'_') ++p;
+    if (p + 4 > s.size()) return false;
+    wchar_t* end = nullptr;
+    std::wstring hex = s.substr(p, 4);
+    unsigned long v = wcstoul(hex.c_str(), &end, 16);
+    if (!end || *end) return false;
+    out = (USHORT)v;
+    return true;
+}
+
+static ULONG hubPortCount(DEVINST hub)
+{
+    auto paths = listInterfaces(GUID_DEVINTERFACE_USB_HUB, devInstId(hub).c_str());
+    if (paths.empty()) return 0;
+    HANDLE h = CreateFileW(paths[0].c_str(), GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    USB_HUB_INFORMATION_EX hi = {};
+    DWORD ret = 0;
+    ULONG n = DeviceIoControl(h, IOCTL_USB_GET_HUB_INFORMATION_EX, &hi, sizeof(hi), &hi, sizeof(hi), &ret, nullptr) ? hi.HighestPortNumber : 0;
+    CloseHandle(h);
+    return n;
+}
+
+static const wchar_t* speedMbps(const std::wstring& s)
+{
+    if (s == L"Low") return L"1.5M";
+    if (s == L"Full") return L"12M";
+    if (s == L"High") return L"480M";
+    if (s == L"Super") return L"5000M";
+    if (s == L"SuperPlus") return L"10000M";
+    return L"?";
+}
+
+static void lsusbWalk(DEVINST hub, int bus, int depth, std::vector<LsEntry>& out)
+{
+    std::vector<std::pair<ULONG, DEVINST>> kids;
+    DEVINST c = 0;
+    if (CM_Get_Child(&c, hub, 0) != CR_SUCCESS) return;
+    do {
+        DWORD port = 0;
+        getU32Prop(c, DEVPKEY_Device_Address, port);
+        kids.emplace_back(port, c);
+    } while (CM_Get_Sibling(&c, c, 0) == CR_SUCCESS);
+    std::sort(kids.begin(), kids.end());
+
+    for (auto& k : kids) {
+        DEVINST di = k.second;
+        Node tmp;
+        UsbBrief b;
+        usbInfo(di, tmp, b);
+        LsEntry e;
+        e.bus = bus; e.depth = depth; e.port = k.first;
+        e.dev = b.deviceAddress; e.vid = b.vid; e.pid = b.pid;
+        if (!b.valid) {   // ハブから取得できないときはインスタンス ID から補う
+            std::wstring id = devInstId(di);
+            parseIdAfter(id, L"VID", e.vid);
+            parseIdAfter(id, L"PID", e.pid);
+        }
+        e.isHub = isUsbHub(di);
+        if (e.isHub) e.hubPorts = hubPortCount(di);
+        e.driver = b.service;
+        e.speed = b.valid ? speedMbps(b.speed) : L"?";
+
+        // 名前: 文字列ディスクリプタ → バス報告名 → デバイスマネージャー上の名前
+        std::wstring m = b.manufacturer, p = b.product, s;
+        if (m.empty() || m[0] == L'(') m.clear();
+        if (p.empty() || p[0] == L'(') p.clear();
+        if (p.empty() && getStrProp(di, DEVPKEY_Device_BusReportedDeviceDesc, s)) p = s;
+        e.name = trim(trim(m) + L" " + trim(p));
+        if (e.name.empty() && getStrProp(di, DEVPKEY_NAME, s)) e.name = s;
+
+        if (b.deviceClass != 0) e.cls = usbClassName(b.deviceClass);
+        else {
+            for (BYTE ic : b.interfaceClasses) { if (!e.cls.empty()) e.cls += L","; e.cls += usbClassName(ic); }
+            if (e.cls.empty()) e.cls = L"?";
+        }
+        out.push_back(e);
+        if (e.isHub) lsusbWalk(di, bus, depth + 1, out);
+    }
+}
+
+static std::wstring lsusb(bool tree)
+{
+    // ルートハブ (親がハブでないハブ) を 1 本のバスとして扱う
+    std::vector<std::wstring> rootIds;
+    for (auto& path : listInterfaces(GUID_DEVINTERFACE_USB_HUB)) {
+        std::wstring id = interfaceInstanceId(path);
+        DEVINST di = 0, parent = 0;
+        if (id.empty() || CM_Locate_DevNodeW(&di, const_cast<DEVINSTID_W>(id.c_str()), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) continue;
+        if (CM_Get_Parent(&parent, di, 0) == CR_SUCCESS && isUsbHub(parent)) continue;
+        rootIds.push_back(id);
+    }
+    std::sort(rootIds.begin(), rootIds.end());
+
+    std::vector<LsEntry> entries;
+    int bus = 0;
+    for (auto& id : rootIds) {
+        DEVINST di = 0;
+        if (CM_Locate_DevNodeW(&di, const_cast<DEVINSTID_W>(id.c_str()), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) continue;
+        LsEntry e;
+        e.bus = ++bus; e.depth = 0; e.port = 1; e.dev = 1; e.isHub = true;
+        e.hubPorts = hubPortCount(di);
+        e.cls = L"root_hub";
+        std::vector<std::wstring> hw;
+        if (getStrListProp(di, DEVPKEY_Device_HardwareIds, hw))
+            for (auto& h : hw) if (parseIdAfter(h, L"VID", e.vid) && parseIdAfter(h, L"PID", e.pid)) break;
+        getStrProp(di, DEVPKEY_NAME, e.name);
+        getStrProp(di, DEVPKEY_Device_Service, e.driver);
+        entries.push_back(e);
+        lsusbWalk(di, bus, 1, entries);
+    }
+
+    std::wstring o;
+    if (!tree) {
+        std::stable_sort(entries.begin(), entries.end(), [](const LsEntry& a, const LsEntry& b) {
+            return a.bus != b.bus ? a.bus < b.bus : a.dev < b.dev;
+        });
+        for (auto& e : entries)
+            o += fmt(L"Bus %03d Device %03u: ID %04x:%04x %s\n", e.bus, e.dev, e.vid, e.pid, e.name.c_str());
+        return o;
+    }
+    for (auto& e : entries) {
+        std::wstring pad((size_t)e.depth * 4, L' ');
+        std::wstring drv = e.driver.empty() ? L"(none)" : e.driver;
+        if (e.isHub && e.hubPorts) drv += fmt(L"/%lup", e.hubPorts);
+        if (e.depth == 0)
+            o += fmt(L"/:  Bus %03d.Port 001: Dev 001, Class=root_hub, Driver=%s\n", e.bus, drv.c_str());
+        else
+            o += pad + fmt(L"|__ Port %03lu: Dev %03u, Class=%s, Driver=%s, %s\n", e.port, e.dev, e.cls.c_str(), drv.c_str(), e.speed.c_str());
+        o += pad + fmt(L"    ID %04x:%04x %s\n", e.vid, e.pid, e.name.c_str());
+    }
+    return o;
+}
+
+static int writeOutput(const std::wstring& out, const std::wstring& outFile, bool bom)
+{
+    std::string utf8 = toUtf8(out);
+    if (!outFile.empty()) {
+        FILE* fp = nullptr;
+        if (_wfopen_s(&fp, outFile.c_str(), L"wb") != 0 || !fp) { fwprintf(stderr, L"cannot open %s\n", outFile.c_str()); return 1; }
+        if (bom) fwrite("\xEF\xBB\xBF", 1, 3, fp);   // Excel 用 BOM
+        fwrite(utf8.data(), 1, utf8.size(), fp);
+        fclose(fp);
+        return 0;
+    }
+    HANDLE so = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0, written = 0;
+    if (GetConsoleMode(so, &mode)) WriteConsoleW(so, out.data(), (DWORD)out.size(), &written, nullptr);
+    else WriteFile(so, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -1420,8 +1602,11 @@ static void usage()
         L"usbinfo - USB device / storage information dumper\n"
         L"\n"
         L"usage: usbinfo [options]\n"
-        L"  -f, --format text|json|csv   output format (default: text)\n"
-        L"                               csv outputs only the per-disk comparison summary\n"
+        L"  -f, --format FORMAT          output format (default: text)\n"
+        L"                                 text | json   full dump\n"
+        L"                                 csv           per-disk comparison summary only\n"
+        L"                                 lsusb         one line per USB device, like lsusb\n"
+        L"                                 lsusb-tree    USB topology tree, like lsusb -tv\n"
         L"  -o, --out FILE               write UTF-8 output to FILE instead of stdout\n"
         L"      --no-wmi                 skip WMI queries\n"
         L"      --no-props               skip the full devnode property dump\n"
@@ -1442,7 +1627,10 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--no-props") opt.allProps = false;
         else { usage(); return (a == L"-h" || a == L"--help") ? 0 : 2; }
     }
-    if (opt.format != L"text" && opt.format != L"json" && opt.format != L"csv") { usage(); return 2; }
+    if (opt.format != L"text" && opt.format != L"json" && opt.format != L"csv" &&
+        opt.format != L"lsusb" && opt.format != L"lsusb-tree") { usage(); return 2; }
+    if (opt.format == L"lsusb" || opt.format == L"lsusb-tree")
+        return writeOutput(lsusb(opt.format == L"lsusb-tree"), opt.outFile, false);
 
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);   // メディアなしドライブのダイアログ抑止
 
@@ -1508,23 +1696,5 @@ int wmain(int argc, wchar_t** argv)
     else if (opt.format == L"csv") emitCsv(summary, out);
     else { size_t i = 0; for (const Node& k : root.kids) emitText(k, out, 0, false, i++); }
 
-    std::string utf8 = toUtf8(out);
-    if (!opt.outFile.empty()) {
-        FILE* fp = nullptr;
-        if (_wfopen_s(&fp, opt.outFile.c_str(), L"wb") != 0 || !fp) { fwprintf(stderr, L"cannot open %s\n", opt.outFile.c_str()); return 1; }
-        if (opt.format == L"csv") fwrite("\xEF\xBB\xBF", 1, 3, fp);   // Excel 用 BOM
-        fwrite(utf8.data(), 1, utf8.size(), fp);
-        fclose(fp);
-    } else {
-        HANDLE so = GetStdHandle(STD_OUTPUT_HANDLE);
-        DWORD mode = 0;
-        if (GetConsoleMode(so, &mode)) {
-            DWORD written = 0;
-            WriteConsoleW(so, out.data(), (DWORD)out.size(), &written, nullptr);
-        } else {
-            DWORD written = 0;
-            WriteFile(so, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
-        }
-    }
-    return 0;
+    return writeOutput(out, opt.outFile, opt.format == L"csv");
 }
