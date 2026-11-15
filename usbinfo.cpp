@@ -1104,6 +1104,58 @@ static void addWmiMatch(Node& out, const wchar_t* name, const std::vector<WmiObj
 }
 
 // ---------------------------------------------------------------------------
+// WPD (デバイスマネージャーの「ポータブル デバイス」)
+// ---------------------------------------------------------------------------
+
+// WpdBusEnum が作るストレージ用 WPD ノードのインスタンス ID は
+//   SWD\WPDBUSENUM\<ボリューム devnode (STORAGE\Volume\...) の ID 後半>
+// という形なので、ボリューム → ディスク番号の順にたどって対応付ける。
+struct WpdDevice {
+    std::wstring instanceId, name, service, volumeInstanceId, volumeInterfacePath, diskPathGuess;
+    DEVINST di = 0;
+    bool hasDevNum = false;
+    STORAGE_DEVICE_NUMBER devNum = {};
+};
+
+static std::vector<WpdDevice> collectWpd()
+{
+    std::vector<WpdDevice> v;
+    const wchar_t* cls = L"{eec5ad98-8080-425f-922a-dabf3de3f69a}";   // GUID_DEVCLASS_WPD
+    const ULONG flags = CM_GETIDLIST_FILTER_CLASS | CM_GETIDLIST_FILTER_PRESENT;
+    ULONG len = 0;
+    if (CM_Get_Device_ID_List_SizeW(&len, cls, flags) != CR_SUCCESS || len < 2) return v;
+    std::vector<wchar_t> buf((size_t)len + 1);
+    if (CM_Get_Device_ID_ListW(cls, buf.data(), len, flags) != CR_SUCCESS) return v;
+
+    const wchar_t* prefix = L"SWD\\WPDBUSENUM\\";
+    for (auto& id : splitMultiSz(buf.data(), len)) {
+        WpdDevice w;
+        w.instanceId = id;
+        if (CM_Locate_DevNodeW(&w.di, const_cast<DEVINSTID_W>(id.c_str()), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) continue;
+        getStrProp(w.di, DEVPKEY_NAME, w.name);
+        getStrProp(w.di, DEVPKEY_Device_Service, w.service);
+        if (startsWithI(id, prefix)) {
+            std::wstring suffix = id.substr(wcslen(prefix));
+            w.volumeInstanceId = L"STORAGE\\Volume\\" + suffix;
+            // リムーバブルメディア機器では後半がディスクのインターフェイスパスそのもの ("_??_USBSTOR#Disk&...#{GUID}")
+            if (startsWithI(suffix, L"_??_")) w.diskPathGuess = L"\\\\?\\" + suffix.substr(4);
+            auto paths = listInterfaces(GUID_DEVINTERFACE_VOLUME, w.volumeInstanceId.c_str());
+            if (!paths.empty()) {
+                w.volumeInterfacePath = paths[0];
+                HANDLE h = CreateFileW(paths[0].c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+                if (h != INVALID_HANDLE_VALUE) {
+                    DWORD ret = 0;
+                    if (DeviceIoControl(h, IOCTL_STORAGE_GET_DEVICE_NUMBER, nullptr, 0, &w.devNum, sizeof(w.devNum), &ret, nullptr)) w.hasDevNum = true;
+                    CloseHandle(h);
+                }
+            }
+        }
+        v.push_back(std::move(w));
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------------------
 // ディスク (GUID_DEVINTERFACE_DISK / CDROM)
 // ---------------------------------------------------------------------------
 
@@ -1264,7 +1316,8 @@ struct WmiData {
 };
 
 static void processDisk(const std::wstring& ifPath, bool isCdrom, const Options& opt, const std::vector<VolumeInfo>& vols,
-                        const WmiData& wmi, std::map<std::wstring, UsbBrief>& usbCache, Node& disks, Node& summary)
+                        const WmiData& wmi, const std::vector<WpdDevice>& wpds, std::map<std::wstring, UsbBrief>& usbCache,
+                        Node& disks, Node& summary)
 {
     Node& d = disks.item();
     d.str(L"kind", isCdrom ? L"CdRom" : L"Disk");
@@ -1373,11 +1426,30 @@ static void processDisk(const std::wstring& ifPath, bool isCdrom, const Options&
         addWmiMatch(w, L"MSFT_PhysicalDisk", wmi.msftPhysicalDisk, L"DeviceId", num);
     }
 
+    // --- WPD (ポータブル デバイス) との対応 ---
+    std::wstring wpdSummary;
+    {
+        Node& wa = d.arr(L"wpd");
+        for (auto& w : wpds) {
+            bool match = f.hasDevNum && w.hasDevNum && w.devNum.DeviceType == f.deviceType && w.devNum.DeviceNumber == f.deviceNumber;
+            if (!match && !w.diskPathGuess.empty() && _wcsicmp(w.diskPathGuess.c_str(), ifPath.c_str()) == 0) match = true;
+            if (!match) continue;
+            Node& n = wa.item();
+            n.str(L"instanceId", w.instanceId);
+            n.str(L"name", w.name);
+            n.str(L"service", w.service);
+            if (!wpdSummary.empty()) wpdSummary += L" | ";
+            wpdSummary += w.name;
+        }
+    }
+    bool hasWpd = !d.find(L"wpd")->kids.empty();
+
     // --- 判定 ---
     bool viaUsb = usbIdx >= 0;
     bool busUsb = f.hasDesc && f.busType == BusTypeUsb;
     bool policyRemovable = hasRemovalPolicy && diskRemovalPolicy != CM_REMOVAL_POLICY_EXPECT_NO_REMOVAL;
     const wchar_t* verdict =
+        (viaUsb && isCdrom) ? L"USB_OPTICAL_DRIVE(excluded)" :   // 光学ドライブはストレージ対象から外す
         (viaUsb && policyRemovable) ? L"USB_REMOVABLE_STORAGE" :
         viaUsb ? L"USB_NON_REMOVABLE(internal?)" :
         busUsb ? L"BUSTYPE_USB_ONLY(check)" : L"NOT_USB";
@@ -1391,7 +1463,9 @@ static void processDisk(const std::wstring& ifPath, bool isCdrom, const Options&
         j.str(L"F_portIsUserConnectable", tri(usb.portUserConnectable));
         j.boolean(L"G_removableMediaBit", f.removableMedia);
         j.str(L"H_deviceHotplug", tri(f.deviceHotplug));
-        j.str(L"verdict(A&&C)", verdict);
+        j.boolean(L"I_hasWpdDevice", hasWpd);
+        j.boolean(L"J_kindIsDisk", !isCdrom);
+        j.str(L"verdict(A&&C&&J)", verdict);
     }
 
     // --- 比較用サマリー行 ---
@@ -1417,6 +1491,7 @@ static void processDisk(const std::wstring& ifPath, bool isCdrom, const Options&
     s.str(L"usbCapRemovable", viaUsb ? tri(usb.capRemovable) : L"");
     s.str(L"usbInLocalMachineContainer", viaUsb ? tri(usb.inLocalMachineContainer) : L"");
     s.str(L"usbPortUserConnectable", viaUsb ? tri(usb.portUserConnectable) : L"");
+    s.str(L"wpdDevice", hasWpd ? wpdSummary : L"(none)");
     s.str(L"verdict", verdict);
     s.str(L"instanceId", instId);
 }
@@ -1686,8 +1761,23 @@ int wmain(int argc, wchar_t** argv)
         if (!e2.empty()) root.str(L"wmiError.MSFT_Disk", e2);
         if (!e3.empty()) root.str(L"wmiError.MSFT_PhysicalDisk", e3);
     }
-    for (auto& path : listInterfaces(GUID_DEVINTERFACE_DISK)) processDisk(path, false, opt, vols, wmi, usbCache, disks, summary);
-    for (auto& path : listInterfaces(GUID_DEVINTERFACE_CDROM)) processDisk(path, true, opt, vols, wmi, usbCache, disks, summary);
+    // --- WPD デバイス全件 (MTP 機器なども含む) ---
+    std::vector<WpdDevice> wpds = collectWpd();
+    Node& wpdDevices = root.arr(L"wpdDevices");
+    for (auto& w : wpds) {
+        Node& n = wpdDevices.item();
+        briefNode(w.di, n);
+        if (!w.volumeInstanceId.empty()) n.str(L"volumeInstanceId", w.volumeInstanceId);
+        if (!w.volumeInterfacePath.empty()) n.str(L"volumeInterfacePath", w.volumeInterfacePath);
+        if (w.hasDevNum) {
+            n.str(L"mappedDevice", fmt(L"%s %lu (partition %lu)", w.devNum.DeviceType == FILE_DEVICE_CD_ROM ? L"CdRom" : L"Disk",
+                                       w.devNum.DeviceNumber, w.devNum.PartitionNumber));
+        } else n.str(L"mappedDevice", L"(none: not a volume-backed WPD device, e.g. MTP)");
+        if (opt.allProps) dumpAllProps(w.di, n.obj(L"allProperties"));
+    }
+
+    for (auto& path : listInterfaces(GUID_DEVINTERFACE_DISK)) processDisk(path, false, opt, vols, wmi, wpds, usbCache, disks, summary);
+    for (auto& path : listInterfaces(GUID_DEVINTERFACE_CDROM)) processDisk(path, true, opt, vols, wmi, wpds, usbCache, disks, summary);
     if (comInit) CoUninitialize();
 
     // --- 出力 ---

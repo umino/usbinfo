@@ -98,6 +98,7 @@ Linux の `lsusb` との違い:
 | `summary[]` | 判定に効く項目だけを並べた比較表。ディスク 1 台につき 1 行 |
 | `disks[]` | 全ディスクと光学ドライブの詳細。比較のため USB 以外も出力する |
 | `usbDevices[]` | 全 USB デバイスの詳細。ストレージ以外も含む |
+| `wpdDevices[]` | デバイスマネージャーの「ポータブル デバイス」(WPD) に出ている全デバイスと、対応するディスク |
 
 ## summary の各列
 
@@ -126,6 +127,7 @@ Linux の `lsusb` との違い:
 | `usbCapRemovable` | USB デバイス本体が取り外し可能とされているか | `CM_DEVCAP_REMOVABLE` |
 | `usbInLocalMachineContainer` | PC 本体と同じコンテナーに属するか。`true` は内蔵扱い | `DEVPKEY_Device_InLocalMachineContainer` |
 | `usbPortUserConnectable` | 接続先ポートがユーザーの手の届くポートか | `IOCTL_USB_GET_PORT_CONNECTOR_PROPERTIES` |
+| `wpdDevice` | 対応する WPD デバイスの名前。なければ `(none)` | WPD クラスの devnode |
 | `verdict` | このツールの判定結果 (後述) | 上記から算出 |
 | `instanceId` | ディスク devnode のデバイスインスタンス ID | Configuration Manager |
 
@@ -135,7 +137,8 @@ Linux の `lsusb` との違い:
 
 | 値 | 条件 |
 |---|---|
-| `USB_REMOVABLE_STORAGE` | USB 経由 (`usbAncestor`) かつ `diskRemovalPolicy` が `ExpectNoRemoval` 以外 |
+| `USB_REMOVABLE_STORAGE` | `kind` が `Disk`、USB 経由 (`usbAncestor`)、かつ `diskRemovalPolicy` が `ExpectNoRemoval` 以外 |
+| `USB_OPTICAL_DRIVE(excluded)` | USB 経由の光学ドライブ (BD / DVD / CD)。ストレージの対象から外す |
 | `USB_NON_REMOVABLE(internal?)` | USB 経由だが取り外し不可扱い。内蔵カードリーダーなどの可能性 |
 | `BUSTYPE_USB_ONLY(check)` | devnode の祖先に USB は見つからないが `busType` は `Usb`。要確認 |
 | `NOT_USB` | USB 経由ではない |
@@ -231,6 +234,10 @@ USB 経由のディスクにだけ出力されます。`usb` は対応する USB
 `Win32_DiskDrive`、`MSFT_Disk`、`MSFT_PhysicalDisk` のうち、ドライブ番号が一致するオブジェクトの全プロパティ (値が NULL のものを除く) です。
 よく参照される `InterfaceType`、`MediaType`、`BusType` は、上記の IOCTL の値を元にしたものです。
 
+### wpd
+
+このディスクに対応する WPD デバイス (インスタンス ID、名前、サービス) です。対応付けの方法は「wpdDevices[] の各項目」を参照してください。
+
 ### judgement (判定の内訳)
 
 | 項目 | 意味 |
@@ -243,7 +250,9 @@ USB 経由のディスクにだけ出力されます。`usb` は対応する USB
 | `F_portIsUserConnectable` | 接続先ポートがユーザー接続可能 |
 | `G_removableMediaBit` | メディア可換ビット |
 | `H_deviceHotplug` | デバイスホットプラグ |
-| `verdict(A&&C)` | A と C から求めた判定結果 |
+| `I_hasWpdDevice` | 対応する WPD デバイスがある (参考値。判定には使っていない) |
+| `J_kindIsDisk` | 光学ドライブではなくディスクである |
+| `verdict(A&&C&&J)` | A、C、J から求めた判定結果 |
 
 ## usbDevices[] の各項目
 
@@ -290,12 +299,35 @@ USB 経由のディスクにだけ出力されます。`usb` は対応する USB
 
 UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代替設定を持つので、実際にどちらで動いているかは `usbStorageDriverService` で確認します。
 
+## wpdDevices[] の各項目
+
+デバイスセットアップクラスが WPD (`{eec5ad98-8080-425f-922a-dabf3de3f69a}`) の devnode を全件出力します。
+ストレージ由来のものだけでなく、スマートフォンやカメラなどの MTP 機器も含みます。
+
+| 項目 | 意味 |
+|---|---|
+| `instanceId` ほか | デバイスツリーの項目と同じ。`name` はドライブレターやボリュームラベル、`service` は `WUDFWpdFs` (ストレージ) や `WUDFWpdMtp` (MTP) など |
+| `volumeInstanceId` | 対応するボリューム devnode の ID |
+| `volumeInterfacePath` | そのボリュームのデバイスインターフェイスのパス |
+| `mappedDevice` | 対応するディスク番号とパーティション番号。MTP 機器などボリュームを持たないものは `(none ...)` |
+| `allProperties` | そのノードが持つ全 `DEVPKEY` |
+
+ストレージ由来の WPD デバイスのインスタンス ID は `SWD\WPDBUSENUM\<後半>` の形で、`<後半>` はボリューム devnode (`STORAGE\Volume\<後半>`) の ID と共通です。
+このツールはそこからボリュームを開き、`IOCTL_STORAGE_GET_DEVICE_NUMBER` でディスク番号を得て対応付けています。
+
 ## 判定方法について
 
-このツールは次の 2 条件の AND を「リムーバブルな USB ストレージ」としています。
+このツールは次の 3 条件の AND を「リムーバブルな USB ストレージ」としています。
 
-1. **USB 経由である**: ディスクの devnode から親をたどり、USB ハブ直下のノードに行き着く。
-2. **取り外し可能である**: ディスク devnode の `DEVPKEY_Device_RemovalPolicy` が `ExpectNoRemoval` 以外。
+1. **ディスクである**: `GUID_DEVINTERFACE_DISK` で列挙されたデバイスである。光学ドライブ (`GUID_DEVINTERFACE_CDROM`) は除く。
+2. **USB 経由である**: ディスクの devnode から親をたどり、USB ハブ直下のノードに行き着く。
+3. **取り外し可能である**: ディスク devnode の `DEVPKEY_Device_RemovalPolicy` が `ExpectNoRemoval` 以外。
+
+WPD デバイスの有無 (`wpdDevice`) は判定には使わず、比較用に出力しています。WPD を判定に使う場合は次の点に注意してください。
+
+- WPD デバイスは Portable Device Enumerator Service (`WPDBusEnum`) が作ります。このサービスが止められている環境では現れません。
+- 接続から WPD デバイスが現れるまでに時間差があります。
+- USB 以外 (内蔵カードリーダーなど) のボリュームや、ディスクではない MTP 機器も WPD に含まれます。
 
 単独で判定に使うと誤りやすい値は次のとおりです。
 
@@ -307,6 +339,8 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 | WMI の `MediaType` / `InterfaceType` | 上記の値を元にしており、同じ弱点を持つ |
 
 特定の機器だけを識別するには VID + PID + シリアル番号を使います。シリアル番号を持たない機器 (`capUniqueID` が `false`) は個体を区別できず、機種単位の識別になります。
+
+実機での調査結果は [docs/findings.md](docs/findings.md) にまとめています。
 
 ## 注意
 
