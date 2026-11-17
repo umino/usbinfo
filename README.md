@@ -99,6 +99,7 @@ Linux の `lsusb` との違い:
 | `disks[]` | 全ディスクと光学ドライブの詳細。比較のため USB 以外も出力する |
 | `usbDevices[]` | 全 USB デバイスの詳細。ストレージ以外も含む |
 | `wpdDevices[]` | デバイスマネージャーの「ポータブル デバイス」(WPD) に出ている全デバイスと、対応するディスク |
+| `volumeInterfaces[]` | `GUID_DEVINTERFACE_VOLUME` で列挙した全ボリュームと、対応するディスクの判定結果 |
 
 ## summary の各列
 
@@ -130,6 +131,7 @@ Linux の `lsusb` との違い:
 | `wpdDevice` | 対応する WPD デバイスの名前。なければ `(none)` | WPD クラスの devnode |
 | `verdict` | このツールの判定結果 (後述) | 上記から算出 |
 | `instanceId` | ディスク devnode のデバイスインスタンス ID | Configuration Manager |
+| `volumeInstanceIds` | このディスク上のボリュームのインターフェイス (`GUID_DEVINTERFACE_VOLUME`) を持つ devnode のインスタンス ID。複数あれば ` \| ` 区切り | `CM_Get_Device_Interface_Property` |
 
 `true` / `false` 以外に、取得できなかった項目は `(n/a)` や `?` になります。USB 経由でないディスクでは `usb*` の列は空です。
 
@@ -195,6 +197,12 @@ Linux の `lsusb` との違い:
 | `partitionNumber` | パーティション番号 |
 | `fileSystem` / `label` / `volumeSerial` / `fileSystemFlags` | ファイルシステム情報 |
 | `totalBytes` / `freeBytes` | 容量と空き |
+
+`volumes[]` は `FindFirstVolume` で列挙したボリュームです。
+
+### volumeInterfaces[] (このディスク上のボリュームのインターフェイス)
+
+`GUID_DEVINTERFACE_VOLUME` で列挙したインターフェイスのうち、このディスクに対応するものです。項目はルートの `volumeInterfaces[]` と同じです (下記)。
 
 ### devnode / ancestors[] (デバイスツリー)
 
@@ -315,6 +323,32 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 ストレージ由来の WPD デバイスのインスタンス ID は `SWD\WPDBUSENUM\<後半>` の形で、`<後半>` はボリューム devnode (`STORAGE\Volume\<後半>`) の ID と共通です。
 このツールはそこからボリュームを開き、`IOCTL_STORAGE_GET_DEVICE_NUMBER` でディスク番号を得て対応付けています。
 
+## volumeInterfaces[] の各項目
+
+`GUID_DEVINTERFACE_VOLUME` で列挙した全ボリュームです。ボリュームを起点に判定する場合の見え方を確認するためのものです。
+
+| 項目 | 意味 |
+|---|---|
+| `instanceId` | インターフェイスを持つ devnode のインスタンス ID (`CM_Get_Device_ID` で得られる値と同じ) |
+| `interfacePath` | インターフェイスのパス。`CreateFile` に渡せる |
+| `volumeGuidPath` | `\\?\Volume{GUID}\` 形式のボリューム名 |
+| `mountPoints` | ドライブレターやマウント先フォルダー |
+| `deviceType` / `deviceNumber` / `partitionNumber` | `IOCTL_STORAGE_GET_DEVICE_NUMBER` の結果。`deviceType` は `DISK` / `CD_ROM` など |
+| `extentDiskNumbers` | `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` で得たディスク番号。複数のディスクにまたがるボリュームでは複数になる |
+| `mappedDisk` | 対応するディスク (`Disk` / `CdRom`、番号、モデル)。見つからなければ `(none)` |
+| `verdict` | 対応するディスクの `verdict`。ディスクがなければ `(no disk)` |
+
+`instanceId` の形はボリュームの種類で異なります。
+
+| ボリューム | `instanceId` の例 |
+|---|---|
+| 固定ディスク扱いのディスク上のボリューム | `STORAGE\Volume\{GUID}#<パーティション開始オフセット>` |
+| リムーバブルメディア扱いのディスク (USB メモリなど) 上のボリューム | `STORAGE\Volume\_??_USBSTOR#Disk&...#{GUID}` (ディスクのインターフェイスパスを埋め込んだ形) |
+| 光学ドライブ | ドライブ自身の devnode (`USBSTOR\CdRom&...` など) |
+
+どの形でも、devnode の親をたどるとボリュームマネージャー (`ROOT\volmgr\0000`) や光学ドライブ自身に行き着き、USB デバイスには届きません。
+ボリュームから USB デバイスまでたどるには、ボリュームを開いてディスク番号を得て、`GUID_DEVINTERFACE_DISK` のディスクと対応付けてから、ディスクの devnode の親をたどります。
+
 ## 判定方法について
 
 このツールは次の 3 条件の AND を「リムーバブルな USB ストレージ」としています。
@@ -322,6 +356,9 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 1. **ディスクである**: `GUID_DEVINTERFACE_DISK` で列挙されたデバイスである。光学ドライブ (`GUID_DEVINTERFACE_CDROM`) は除く。
 2. **USB 経由である**: ディスクの devnode から親をたどり、USB ハブ直下のノードに行き着く。
 3. **取り外し可能である**: ディスク devnode の `DEVPKEY_Device_RemovalPolicy` が `ExpectNoRemoval` 以外。
+
+ボリュームを起点にする場合は、ボリュームのインターフェイスで `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行し、`DeviceType` が `FILE_DEVICE_DISK` のものだけを残してから、ディスク番号で対応付けたディスクに 2、3 の条件を適用します。
+光学ドライブは `DeviceType` が `FILE_DEVICE_CD_ROM` になるので、条件 1 の代わりにこれで除外できます。ボリュームを持たないディスク (未フォーマットなど) は一覧に現れません。
 
 WPD デバイスの有無 (`wpdDevice`) は判定には使わず、比較用に出力しています。WPD を判定に使う場合は次の点に注意してください。
 

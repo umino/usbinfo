@@ -9,3 +9,4 @@ usbinfo_sample.txt
 result*.txt
 result*.json
 summary*.csv
+captures/
