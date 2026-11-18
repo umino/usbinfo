@@ -955,6 +955,7 @@ struct VolumeInfo {
     DWORD serial = 0, fsFlags = 0, volInfoErr = 0;
     ULARGE_INTEGER total = {}, freeBytes = {};
     bool hasSpace = false;
+    std::wstring ownerInstanceId;   // ボリュームのインターフェイスを持つ devnode の ID (VolumeIface と同じ GUID パスのもの)
 };
 
 static std::vector<VolumeInfo> collectVolumes()
@@ -1367,29 +1368,53 @@ struct WmiData {
     std::vector<WmiObject> diskDrive, msftDisk, msftPhysicalDisk;
 };
 
+enum class DevKind { Disk, CdRom, Floppy };
+
+static const wchar_t* kindName(DevKind k)
+{
+    return k == DevKind::CdRom ? L"CdRom" : k == DevKind::Floppy ? L"Floppy" : L"Disk";
+}
+
 struct DiskResult {
+    DevKind kind = DevKind::Disk;
     bool hasDevNum = false;
     DEVICE_TYPE deviceType = 0;
     DWORD deviceNumber = 0;
     std::wstring instanceId, model, verdict;
 };
 
-// ボリュームのインターフェイスがこのディスクのものか (ディスク番号で対応付ける)
-static bool volumeIfaceOnDisk(const VolumeIface& v, const DiskResult& r, bool isCdrom)
+// ボリュームがこのドライブのものか。
+//   ownerId: ボリュームのインターフェイスを持つ devnode の ID (不明なら空)
+// 光学ドライブとフロッピーはドライブ自身がボリュームのインターフェイスを持つので、ID の一致で対応付ける。
+// フロッピーは IOCTL_STORAGE_GET_DEVICE_NUMBER が DeviceType=DISK と「フロッピーの通し番号」を返し、
+// ハードディスクの番号 (PhysicalDriveN) と衝突するため、番号では対応付けない。
+// STORAGE\Volume\... のボリュームだけを、ディスク番号でハードディスクと対応付ける。
+static bool volumeBelongs(const std::wstring& ownerId, bool hasDevNum, const STORAGE_DEVICE_NUMBER& dn,
+                          const std::vector<DWORD>& extentDisks, const DiskResult& r)
 {
+    if (!ownerId.empty() && !startsWithI(ownerId, L"STORAGE\\Volume\\"))
+        return _wcsicmp(ownerId.c_str(), r.instanceId.c_str()) == 0;
     if (!r.hasDevNum) return false;
-    if (v.hasDevNum && v.devNum.DeviceType == r.deviceType && v.devNum.DeviceNumber == r.deviceNumber) return true;
-    if (!isCdrom) for (DWORD n : v.extentDisks) if (n == r.deviceNumber) return true;
+    if (!ownerId.empty() && r.kind != DevKind::Disk) return false;      // STORAGE\Volume はハードディスク上のボリューム
+    if (r.kind == DevKind::Floppy) return false;                         // 持ち主が不明なボリュームは番号が衝突しうる
+    if (hasDevNum && dn.DeviceType == r.deviceType && dn.DeviceNumber == r.deviceNumber) return true;
+    if (r.kind == DevKind::Disk) for (DWORD n : extentDisks) if (n == r.deviceNumber) return true;
     return false;
 }
 
-static DiskResult processDisk(const std::wstring& ifPath, bool isCdrom, const Options& opt, const std::vector<VolumeInfo>& vols,
+static bool volumeIfaceOnDisk(const VolumeIface& v, const DiskResult& r)
+{
+    return volumeBelongs(v.instanceId, v.hasDevNum, v.devNum, v.extentDisks, r);
+}
+
+static DiskResult processDisk(const std::wstring& ifPath, DevKind kind, const Options& opt, const std::vector<VolumeInfo>& vols,
                               const std::vector<VolumeIface>& volIfaces,
                               const WmiData& wmi, const std::vector<WpdDevice>& wpds, std::map<std::wstring, UsbBrief>& usbCache,
                               Node& disks, Node& summary)
 {
+    const bool isCdrom = kind == DevKind::CdRom;
     Node& d = disks.item();
-    d.str(L"kind", isCdrom ? L"CdRom" : L"Disk");
+    d.str(L"kind", kindName(kind));
     d.str(L"interfacePath", ifPath);
     std::wstring instId = interfaceInstanceId(ifPath);
     d.str(L"instanceId", instId);
@@ -1403,17 +1428,23 @@ static DiskResult processDisk(const std::wstring& ifPath, bool isCdrom, const Op
         else { f.opened = true; dumpStorage(h, st, f); CloseHandle(h); }
     }
 
+    DiskResult res;
+    res.kind = kind;
+    res.hasDevNum = f.hasDevNum;
+    res.deviceType = f.deviceType;
+    res.deviceNumber = f.deviceNumber;
+    res.instanceId = instId;
+
     // --- ボリューム ---
     std::wstring mountsSummary, driveTypesSummary;
     {
         Node& va = d.arr(L"volumes");
         for (auto& v : vols) {
-            bool match = false;
-            if (f.hasDevNum) {
-                if (v.hasDevNum && v.devNum.DeviceType == f.deviceType && v.devNum.DeviceNumber == f.deviceNumber) match = true;
-                if (!isCdrom) for (auto& e : v.extents) if (e.DiskNumber == f.deviceNumber) match = true;
-            }
-            if (!match) continue;
+            std::vector<DWORD> ext;
+            for (auto& e : v.extents) ext.push_back(e.DiskNumber);
+            // インターフェイスと結び付かなかったフロッピーのボリュームは、番号が衝突するのでハードディスクに割り当てない
+            if (v.ownerInstanceId.empty() && startsWithI(v.dosDevice, L"\\Device\\Floppy")) continue;
+            if (!volumeBelongs(v.ownerInstanceId, v.hasDevNum, v.devNum, ext, res)) continue;
             Node& n = va.item();
             n.str(L"volumeGuidPath", v.guidPath);
             n.str(L"dosDevice", v.dosDevice);
@@ -1437,16 +1468,11 @@ static DiskResult processDisk(const std::wstring& ifPath, bool isCdrom, const Op
     }
 
     // --- ボリュームのインターフェイス (GUID_DEVINTERFACE_VOLUME) ---
-    DiskResult res;
-    res.hasDevNum = f.hasDevNum;
-    res.deviceType = f.deviceType;
-    res.deviceNumber = f.deviceNumber;
-    res.instanceId = instId;
     std::wstring volIfaceSummary;
     {
         Node& va = d.arr(L"volumeInterfaces");
         for (auto& v : volIfaces) {
-            if (!volumeIfaceOnDisk(v, res, isCdrom)) continue;
+            if (!volumeIfaceOnDisk(v, res)) continue;
             Node& n = va.item();
             n.str(L"instanceId", v.instanceId);
             n.str(L"interfacePath", v.path);
@@ -1509,7 +1535,7 @@ static DiskResult processDisk(const std::wstring& ifPath, bool isCdrom, const Op
     }
 
     // --- WMI ---
-    if (opt.wmi && f.hasDevNum && !isCdrom) {
+    if (opt.wmi && f.hasDevNum && kind == DevKind::Disk) {   // フロッピーの番号は PhysicalDriveN と別系統なので照合しない
         Node& w = d.obj(L"wmi");
         std::wstring num = fmt(L"%lu", f.deviceNumber);
         addWmiMatch(w, L"Win32_DiskDrive", wmi.diskDrive, L"Index", num);
@@ -1522,7 +1548,9 @@ static DiskResult processDisk(const std::wstring& ifPath, bool isCdrom, const Op
     {
         Node& wa = d.arr(L"wpd");
         for (auto& w : wpds) {
-            bool match = f.hasDevNum && w.hasDevNum && w.devNum.DeviceType == f.deviceType && w.devNum.DeviceNumber == f.deviceNumber;
+            // w.devNum は STORAGE\Volume\... 経由で得た値なのでハードディスクの番号。フロッピーとは番号で照合しない
+            bool match = kind != DevKind::Floppy && f.hasDevNum && w.hasDevNum &&
+                         w.devNum.DeviceType == f.deviceType && w.devNum.DeviceNumber == f.deviceNumber;
             if (!match && !w.diskPathGuess.empty() && _wcsicmp(w.diskPathGuess.c_str(), ifPath.c_str()) == 0) match = true;
             if (!match) continue;
             Node& n = wa.item();
@@ -1541,6 +1569,7 @@ static DiskResult processDisk(const std::wstring& ifPath, bool isCdrom, const Op
     bool policyRemovable = hasRemovalPolicy && diskRemovalPolicy != CM_REMOVAL_POLICY_EXPECT_NO_REMOVAL;
     const wchar_t* verdict =
         (viaUsb && isCdrom) ? L"USB_OPTICAL_DRIVE(excluded)" :   // 光学ドライブはストレージ対象から外す
+        (viaUsb && kind == DevKind::Floppy) ? L"USB_FLOPPY_DRIVE" :   // 対象にするかは要件次第なので別の値にする
         (viaUsb && policyRemovable) ? L"USB_REMOVABLE_STORAGE" :
         viaUsb ? L"USB_NON_REMOVABLE(internal?)" :
         busUsb ? L"BUSTYPE_USB_ONLY(check)" : L"NOT_USB";
@@ -1555,13 +1584,13 @@ static DiskResult processDisk(const std::wstring& ifPath, bool isCdrom, const Op
         j.boolean(L"G_removableMediaBit", f.removableMedia);
         j.str(L"H_deviceHotplug", tri(f.deviceHotplug));
         j.boolean(L"I_hasWpdDevice", hasWpd);
-        j.boolean(L"J_kindIsDisk", !isCdrom);
+        j.boolean(L"J_kindIsDisk", kind == DevKind::Disk);
         j.str(L"verdict(A&&C&&J)", verdict);
     }
 
     // --- 比較用サマリー行 ---
     Node& s = summary.item();
-    s.str(L"kind", isCdrom ? L"CdRom" : L"Disk");
+    s.str(L"kind", kindName(kind));
     s.str(L"number", f.hasDevNum ? fmt(L"%lu", f.deviceNumber) : L"?");
     s.str(L"model", trim(f.vendor + L" " + f.product));
     s.str(L"sizeGB", f.hasSize ? fmt(L"%.1f", f.size / 1e9) : L"");
@@ -1873,11 +1902,20 @@ int wmain(int argc, wchar_t** argv)
     }
 
     std::vector<VolumeIface> volIfaces = collectVolumeIfaces();
-    std::vector<std::pair<DiskResult, bool>> diskResults;   // (結果, 光学ドライブか)
-    for (auto& path : listInterfaces(GUID_DEVINTERFACE_DISK))
-        diskResults.emplace_back(processDisk(path, false, opt, vols, volIfaces, wmi, wpds, usbCache, disks, summary), false);
-    for (auto& path : listInterfaces(GUID_DEVINTERFACE_CDROM))
-        diskResults.emplace_back(processDisk(path, true, opt, vols, volIfaces, wmi, wpds, usbCache, disks, summary), true);
+    // FindFirstVolume のボリュームに、同じ GUID パスを持つインターフェイスの devnode ID を結び付ける
+    for (auto& v : vols)
+        for (auto& vi : volIfaces)
+            if (!vi.guidPath.empty() && _wcsicmp(vi.guidPath.c_str(), v.guidPath.c_str()) == 0) { v.ownerInstanceId = vi.instanceId; break; }
+
+    std::vector<DiskResult> diskResults;
+    const std::pair<const GUID*, DevKind> kinds[] = {
+        { &GUID_DEVINTERFACE_DISK, DevKind::Disk },
+        { &GUID_DEVINTERFACE_CDROM, DevKind::CdRom },
+        { &GUID_DEVINTERFACE_FLOPPY, DevKind::Floppy },
+    };
+    for (auto& k : kinds)
+        for (auto& path : listInterfaces(*k.first))
+            diskResults.push_back(processDisk(path, k.second, opt, vols, volIfaces, wmi, wpds, usbCache, disks, summary));
     if (comInit) CoUninitialize();
 
     // --- ボリュームのインターフェイス起点の一覧 (GUID_DEVINTERFACE_VOLUME → ディスク番号 → ディスクの判定) ---
@@ -1901,10 +1939,10 @@ int wmain(int argc, wchar_t** argv)
         }
         std::wstring mapped, verdict;
         for (auto& dr : diskResults)
-            if (volumeIfaceOnDisk(v, dr.first, dr.second)) {
+            if (volumeIfaceOnDisk(v, dr)) {
                 if (!mapped.empty()) { mapped += L" | "; verdict += L" | "; }
-                mapped += fmt(L"%s %lu %s", dr.second ? L"CdRom" : L"Disk", dr.first.deviceNumber, dr.first.model.c_str());
-                verdict += dr.first.verdict;
+                mapped += fmt(L"%s %lu %s", kindName(dr.kind), dr.deviceNumber, dr.model.c_str());
+                verdict += dr.verdict;
             }
         n.str(L"mappedDisk", mapped.empty() ? L"(none)" : mapped);
         n.str(L"verdict", verdict.empty() ? L"(no disk)" : verdict);

@@ -107,8 +107,8 @@ Linux の `lsusb` との違い:
 
 | 列 | 意味 | 取得元 |
 |---|---|---|
-| `kind` | `Disk` または `CdRom` | 列挙したデバイスインターフェイス |
-| `number` | 物理ドライブ番号 (`\\.\PhysicalDriveN` の N) | `IOCTL_STORAGE_GET_DEVICE_NUMBER` |
+| `kind` | `Disk`、`CdRom`、`Floppy` のいずれか | 列挙したデバイスインターフェイス |
+| `number` | 物理ドライブ番号 (`\\.\PhysicalDriveN` の N)。光学ドライブとフロッピーはそれぞれ別の通し番号 (`CdRomN`、`FloppyN`) | `IOCTL_STORAGE_GET_DEVICE_NUMBER` |
 | `model` | ベンダー名 + 製品名 | `STORAGE_DEVICE_DESCRIPTOR` |
 | `sizeGB` | 容量 (10 進 GB)。メディアなしのときは空 | `IOCTL_DISK_GET_DRIVE_GEOMETRY_EX` |
 | `mounts` | ドライブレターやマウントポイント | ボリューム API |
@@ -141,6 +141,7 @@ Linux の `lsusb` との違い:
 |---|---|
 | `USB_REMOVABLE_STORAGE` | `kind` が `Disk`、USB 経由 (`usbAncestor`)、かつ `diskRemovalPolicy` が `ExpectNoRemoval` 以外 |
 | `USB_OPTICAL_DRIVE(excluded)` | USB 経由の光学ドライブ (BD / DVD / CD)。ストレージの対象から外す |
+| `USB_FLOPPY_DRIVE` | USB 経由のフロッピードライブ。対象にするかは要件次第なので、ほかと分けている |
 | `USB_NON_REMOVABLE(internal?)` | USB 経由だが取り外し不可扱い。内蔵カードリーダーなどの可能性 |
 | `BUSTYPE_USB_ONLY(check)` | devnode の祖先に USB は見つからないが `busType` は `Usb`。要確認 |
 | `NOT_USB` | USB 経由ではない |
@@ -151,7 +152,7 @@ Linux の `lsusb` との違い:
 
 | 項目 | 意味 |
 |---|---|
-| `kind` | `Disk` (`GUID_DEVINTERFACE_DISK`) または `CdRom` (`GUID_DEVINTERFACE_CDROM`) |
+| `kind` | `Disk` (`GUID_DEVINTERFACE_DISK`)、`CdRom` (`GUID_DEVINTERFACE_CDROM`)、`Floppy` (`GUID_DEVINTERFACE_FLOPPY`) のいずれか |
 | `interfacePath` | デバイスインターフェイスのパス。`CreateFile` に渡せる |
 | `instanceId` | ディスク devnode のデバイスインスタンス ID |
 
@@ -259,7 +260,7 @@ USB 経由のディスクにだけ出力されます。`usb` は対応する USB
 | `G_removableMediaBit` | メディア可換ビット |
 | `H_deviceHotplug` | デバイスホットプラグ |
 | `I_hasWpdDevice` | 対応する WPD デバイスがある (参考値。判定には使っていない) |
-| `J_kindIsDisk` | 光学ドライブではなくディスクである |
+| `J_kindIsDisk` | 光学ドライブやフロッピーではなくディスクである |
 | `verdict(A&&C&&J)` | A、C、J から求めた判定結果 |
 
 ## usbDevices[] の各項目
@@ -344,10 +345,16 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 |---|---|
 | 固定ディスク扱いのディスク上のボリューム | `STORAGE\Volume\{GUID}#<パーティション開始オフセット>` |
 | リムーバブルメディア扱いのディスク (USB メモリなど) 上のボリューム | `STORAGE\Volume\_??_USBSTOR#Disk&...#{GUID}` (ディスクのインターフェイスパスを埋め込んだ形) |
-| 光学ドライブ | ドライブ自身の devnode (`USBSTOR\CdRom&...` など) |
+| 光学ドライブ、フロッピー | ドライブ自身の devnode (`USBSTOR\CdRom&...`、`USBSTOR\SFloppy&...` など) |
 
-どの形でも、devnode の親をたどるとボリュームマネージャー (`ROOT\volmgr\0000`) や光学ドライブ自身に行き着き、USB デバイスには届きません。
-ボリュームから USB デバイスまでたどるには、ボリュームを開いてディスク番号を得て、`GUID_DEVINTERFACE_DISK` のディスクと対応付けてから、ディスクの devnode の親をたどります。
+`STORAGE\Volume\...` の devnode の親をたどると、ボリュームマネージャー (`ROOT\volmgr\0000`) に行き着き、USB デバイスには届きません。
+そのため、このツールは次のようにボリュームとドライブを対応付けています。
+
+- **`STORAGE\Volume\...` のボリューム**: ボリュームを開いて `IOCTL_STORAGE_GET_DEVICE_NUMBER` でディスク番号を得て、`GUID_DEVINTERFACE_DISK` のディスクと番号で対応付ける。
+- **それ以外 (光学ドライブ、フロッピー)**: インターフェイスを持つ devnode がドライブ自身なので、インスタンス ID の一致で対応付ける。
+
+フロッピーを番号で対応付けてはいけない理由は、フロッピーのボリュームに `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行すると、`DeviceType` が `FILE_DEVICE_DISK`、`DeviceNumber` がフロッピーの通し番号 (`\Device\Floppy0` なら 0) になるためです。
+この番号はハードディスクの番号 (`PhysicalDrive0`) と区別がつかず、種類と番号だけで探すと `PhysicalDrive0` のディスクに誤って対応付けられます。
 
 ## 判定方法について
 
@@ -358,7 +365,9 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 3. **取り外し可能である**: ディスク devnode の `DEVPKEY_Device_RemovalPolicy` が `ExpectNoRemoval` 以外。
 
 ボリュームを起点にする場合は、ボリュームのインターフェイスで `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行し、`DeviceType` が `FILE_DEVICE_DISK` のものだけを残してから、ディスク番号で対応付けたディスクに 2、3 の条件を適用します。
-光学ドライブは `DeviceType` が `FILE_DEVICE_CD_ROM` になるので、条件 1 の代わりにこれで除外できます。ボリュームを持たないディスク (未フォーマットなど) は一覧に現れません。
+光学ドライブは `DeviceType` が `FILE_DEVICE_CD_ROM` になるので、これで除外できます。
+ただし、フロッピーは `DeviceType` が `FILE_DEVICE_DISK` になるので、この確認では除外できません。ボリュームのインスタンス ID が `STORAGE\Volume\` で始まるものだけをディスク番号で対応付け、それ以外はインスタンス ID の devnode 自身から親をたどってください (「volumeInterfaces[] の各項目」を参照)。
+ボリュームを持たないディスク (未フォーマットなど) は一覧に現れません。
 
 WPD デバイスの有無 (`wpdDevice`) は判定には使わず、比較用に出力しています。WPD を判定に使う場合は次の点に注意してください。
 
