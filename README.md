@@ -7,6 +7,8 @@
 - 管理者権限: 不要
 - 出力: テキスト / JSON / CSV (いずれも UTF-8)
 
+USB の仕様に詳しくない人向けに、動作のしくみを図で説明したページを [docs/how-it-works.html](docs/how-it-works.html) に置いています (ブラウザで開いてください)。
+
 ## ビルド
 
 Visual Studio (C++ デスクトップ開発ワークロード) で `usbinfo.vcxproj` を開いてビルドするか、MSBuild を使います。

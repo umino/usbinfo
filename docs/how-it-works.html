@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>usbinfo のしくみ</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+JP:wght@400;500;700&display=swap">
+<style>
+/* Layout: 単一カラムの技術解説。各節は「短い説明 → 図 → 補足」の順。図は横スクロール可能な枠に入れる */
+:root {
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --fg: #17212b;
+  --muted: #5b6977;
+  --line: #d3dae2;
+  --accent: #0a7484;
+  --accent-soft: #dcf0f2;
+  --warn: #a8530f;
+  --warn-soft: #faecdf;
+  --ok: #2c7a3a;
+  --ok-soft: #e2f2e4;
+  --ng: #b03636;
+  --ng-soft: #f8e2e2;
+  --font-body: "IBM Plex Sans JP", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f151b; --surface: #17202a; --fg: #e2e8ee; --muted: #94a2b0; --line: #2d3a47;
+    --accent: #4fc2cf; --accent-soft: #12363c; --warn: #eea062; --warn-soft: #3a2816;
+    --ok: #74cc82; --ok-soft: #173119; --ng: #ef8484; --ng-soft: #3b1c1c; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f151b; --surface: #17202a; --fg: #e2e8ee; --muted: #94a2b0; --line: #2d3a47;
+  --accent: #4fc2cf; --accent-soft: #12363c; --warn: #eea062; --warn-soft: #3a2816;
+  --ok: #74cc82; --ok-soft: #173119; --ng: #ef8484; --ng-soft: #3b1c1c; color-scheme: dark;
+}
+
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15.5px; line-height: 1.8; }
+.wrap { max-width: 880px; margin: 0 auto; padding-block: 40px 80px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 56px; }
+header { display: grid; gap: 12px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; color: var(--accent); text-transform: uppercase; }
+h1 { font-size: clamp(28px, 5vw, 40px); line-height: 1.25; margin: 0; text-wrap: balance; }
+h2 { font-size: 22px; line-height: 1.4; margin: 0; text-wrap: balance; display: flex; gap: 12px; align-items: baseline; }
+h2 .no { font-family: var(--font-mono); font-size: 14px; color: var(--accent); font-weight: 500; }
+h3 { font-size: 16px; margin: 0; }
+p { margin: 0; max-width: 68ch; }
+.lede { font-size: 17px; color: var(--muted); max-width: 64ch; }
+section { display: grid; gap: 18px; min-width: 0; }
+code, .mono { font-family: var(--font-mono); font-size: .88em; }
+p code, li code, td code, dd code { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; word-break: break-all; }
+ul { margin: 0; padding-left: 1.3em; max-width: 68ch; }
+li + li { margin-top: 4px; }
+
+.key { background: var(--accent-soft); border-left: 3px solid var(--accent); padding: 14px 18px; border-radius: 0 6px 6px 0; }
+.key p { max-width: none; }
+
+figure { margin: 0; display: grid; gap: 10px; min-width: 0; }
+.fig { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; padding: 12px; }
+.fig svg { display: block; min-width: 640px; width: 100%; height: auto; }
+figcaption { font-size: 13px; color: var(--muted); }
+
+/* SVG */
+.b { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+.b-hub { fill: var(--surface); stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 3; }
+.b-usb { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.6; }
+.b-disk { fill: var(--surface); stroke: var(--fg); stroke-width: 1.4; }
+.b-q { fill: var(--surface); stroke: var(--fg); stroke-width: 1.2; }
+.b-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.4; }
+.b-okstrong { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 2.4; }
+.b-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; }
+.b-mute { fill: var(--bg); stroke: var(--line); stroke-width: 1.2; }
+.b-port { fill: var(--bg); stroke: var(--muted); stroke-width: 1; }
+.b-port-on { fill: var(--accent); stroke: var(--accent); }
+.t { fill: var(--fg); font-family: var(--font-body); font-size: 13px; font-weight: 700; }
+.ts { fill: var(--muted); font-family: var(--font-body); font-size: 11.5px; }
+.id { fill: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+.code { fill: var(--fg); font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
+.code-big { fill: var(--ok); font-family: var(--font-mono); font-size: 14px; font-weight: 600; }
+.lbl { fill: var(--muted); font-family: var(--font-body); font-size: 11.5px; }
+.lbl-mono { fill: var(--muted); font-family: var(--font-mono); font-size: 10px; }
+.warn-t { fill: var(--warn); font-family: var(--font-body); font-size: 12px; font-weight: 500; }
+.ok-t { fill: var(--ok); font-family: var(--font-body); font-size: 12px; font-weight: 500; }
+.edge { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+.edge-acc { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+.edge-warn { stroke: var(--warn); stroke-width: 1.2; fill: none; }
+.ah { fill: var(--muted); }
+.ah-acc { fill: var(--accent); }
+.mid { text-anchor: middle; }
+.end { text-anchor: end; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.sw { width: 22px; height: 14px; border-radius: 3px; display: inline-block; }
+.sw-hub { border: 1.5px dashed var(--muted); }
+.sw-usb { background: var(--accent-soft); border: 1.5px solid var(--accent); }
+.sw-disk { border: 1.5px solid var(--fg); }
+
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.card p { font-size: 14.5px; }
+.tag { justify-self: start; font-family: var(--font-mono); font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--bg); border: 1px solid var(--line); color: var(--muted); }
+
+.steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 0; max-width: none; }
+.steps li { display: grid; grid-template-columns: 44px 1fr; gap: 14px; position: relative; padding-bottom: 20px; margin: 0; }
+.steps li::before { content: ""; position: absolute; left: 21px; top: 36px; bottom: 0; width: 2px; background: var(--line); }
+.steps li:last-child::before { display: none; }
+.steps .n { width: 44px; height: 36px; border-radius: 6px; display: grid; place-items: center; font-family: var(--font-mono); font-weight: 600; background: var(--surface); border: 1px solid var(--line); color: var(--muted); }
+.steps li.main .n { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.steps .body { display: grid; gap: 4px; min-width: 0; padding-top: 5px; }
+.steps .body p { font-size: 14.5px; color: var(--muted); }
+.steps .api { font-family: var(--font-mono); font-size: 12px; color: var(--accent); word-break: break-all; }
+
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 720px; }
+th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+thead th { font-size: 12px; color: var(--muted); font-weight: 500; background: var(--bg); }
+thead th code { font-size: 11.5px; }
+tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+tbody th { font-weight: 500; white-space: nowrap; }
+td.c { font-family: var(--font-mono); font-size: 12px; white-space: nowrap; }
+td.ok { background: var(--ok-soft); color: var(--ok); }
+td.ng { background: var(--ng-soft); color: var(--ng); }
+td.ok::before { content: "○ "; }
+td.ng::before { content: "× "; }
+td.combo { border-left: 2px solid var(--ok); font-weight: 600; }
+.exp { font-size: 12px; padding: 1px 8px; border-radius: 99px; white-space: nowrap; }
+.exp-in { background: var(--accent-soft); color: var(--accent); }
+.exp-out { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
+
+.map { display: grid; gap: 10px; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 14px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); }
+.row.bad { border-color: var(--ng); background: var(--ng-soft); }
+.chip { font-family: var(--font-mono); font-size: 12px; padding: 3px 9px; border-radius: 5px; background: var(--bg); border: 1px solid var(--line); word-break: break-all; }
+.chip.hl { border-color: var(--accent); color: var(--accent); }
+.row.bad .chip.hl { border-color: var(--ng); color: var(--ng); }
+.arrow { color: var(--muted); font-size: 13px; }
+.row .note { flex-basis: 100%; font-size: 13px; color: var(--muted); }
+.row.bad .note { color: var(--ng); }
+
+dl { margin: 0; display: grid; grid-template-columns: minmax(130px, max-content) 1fr; gap: 10px 20px; }
+dt { font-weight: 700; font-size: 14.5px; }
+dd { margin: 0; font-size: 14.5px; color: var(--muted); min-width: 0; }
+@media (max-width: 560px) {
+  dl { grid-template-columns: 1fr; gap: 2px; }
+  dd { margin-bottom: 10px; }
+}
+footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">usbinfo / Windows デバイス調査ツール</div>
+  <h1>usbinfo のしくみ</h1>
+  <p class="lede">接続中のディスクのうち「USB で外付けされた、取り外せるストレージ」はどれかを判定するために、Windows から取れる値をまとめてダンプするツールです。プログラムは読めるけれど USB の仕様には詳しくない人向けに、動きを図で説明します。</p>
+</header>
+
+<section>
+  <h2><span class="no">1</span>何を調べるツールか</h2>
+  <p>Windows にはディスクの情報を返す API がたくさんあり、それぞれが「取り外せる」「USB だ」といった値を返します。ところが、<strong>どの値が正しく当たるかは機器によって違います</strong>。たとえば「リムーバブル」を返す API は、USB の SSD に対して「固定ディスク」と答えます。</p>
+  <p>そこで usbinfo は、取れる値をすべて並べて出力し、実機で比べられるようにしています。1 ファイルの C++ コンソールアプリ（<code>usbinfo.cpp</code>）で、管理者権限はいりません。</p>
+  <div class="key"><p><strong>結論を先に言うと</strong>、判定には「ディスクであること」「デバイスの木をたどると USB に行き着くこと」「OS が取り外しを想定していること」の 3 つを組み合わせます。以下はその理由と、値の取り方の説明です。</p></div>
+</section>
+
+<section>
+  <h2><span class="no">2</span>Windows はデバイスを「木」で管理している</h2>
+  <p>Windows は、つながっている機器を親子関係のある木構造で管理しています。木の各ノードを <strong>devnode</strong> と呼びます。プログラムからは <code>CM_Get_Parent()</code> で親をたどれて、各ノードは <code>DEVPKEY_*</code> というキーでプロパティを持っています。デバイスマネージャーの「表示 → デバイス (接続別)」で見えるのがこの木です。</p>
+  <p>下の図は、今回の調査で使った 3 種類のディスクの木です。いちばん下のディスクから上へ親をたどります。</p>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 800 600" role="img" aria-labelledby="t1">
+        <title id="t1">BOT 接続、UAS 接続、内蔵 NVMe の 3 種類のディスクの devnode ツリー</title>
+        <defs>
+          <marker id="up" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0 L10 5 L0 10 z"/></marker>
+        </defs>
+
+        <text class="t mid" x="135" y="28">USB-SATA 変換ケース</text>
+        <text class="ts mid" x="135" y="46">BOT 方式・外付けハブ経由</text>
+        <text class="t mid" x="400" y="28">NVMe ケース</text>
+        <text class="ts mid" x="400" y="46">UAS 方式・PC に直結</text>
+        <text class="t mid" x="665" y="28">内蔵 NVMe SSD</text>
+        <text class="ts mid" x="665" y="46">マザーボードに直結</text>
+
+        <!-- column 1 -->
+        <rect class="b" x="20" y="70" width="230" height="58" rx="6"/>
+        <text class="t" x="34" y="94">xHCI ホストコントローラー</text>
+        <text class="id" x="34" y="114">PCI\VEN_…&amp;DEV_…</text>
+        <rect class="b-hub" x="20" y="158" width="230" height="58" rx="6"/>
+        <text class="t" x="34" y="182">ルートハブ</text>
+        <text class="id" x="34" y="202">USB\ROOT_HUB30\…</text>
+        <rect class="b-hub" x="20" y="246" width="230" height="58" rx="6"/>
+        <text class="t" x="34" y="270">外付けハブ</text>
+        <text class="id" x="34" y="290">USB\VID_…&amp;PID_…\…</text>
+        <rect class="b-usb" x="20" y="334" width="230" height="58" rx="6"/>
+        <text class="t" x="34" y="358">USB デバイス本体</text>
+        <text class="id" x="34" y="378">USB\VID_152D&amp;PID_2329\…</text>
+        <rect class="b-disk" x="20" y="422" width="230" height="58" rx="6"/>
+        <text class="t" x="34" y="446">ディスク</text>
+        <text class="id" x="34" y="466">USBSTOR\Disk&amp;Ven_…</text>
+        <path class="edge" d="M135 422 V394" marker-end="url(#up)"/>
+        <path class="edge" d="M135 334 V306" marker-end="url(#up)"/>
+        <path class="edge" d="M135 246 V218" marker-end="url(#up)"/>
+        <path class="edge" d="M135 158 V130" marker-end="url(#up)"/>
+
+        <!-- column 2 -->
+        <rect class="b" x="285" y="158" width="230" height="58" rx="6"/>
+        <text class="t" x="299" y="182">xHCI ホストコントローラー</text>
+        <text class="id" x="299" y="202">PCI\VEN_…&amp;DEV_…</text>
+        <rect class="b-hub" x="285" y="246" width="230" height="58" rx="6"/>
+        <text class="t" x="299" y="270">ルートハブ</text>
+        <text class="id" x="299" y="290">USB\ROOT_HUB30\…</text>
+        <rect class="b-usb" x="285" y="334" width="230" height="58" rx="6"/>
+        <text class="t" x="299" y="358">USB デバイス本体</text>
+        <text class="id" x="299" y="378">USB\VID_152D&amp;PID_A583\…</text>
+        <rect class="b-disk" x="285" y="422" width="230" height="58" rx="6"/>
+        <text class="t" x="299" y="446">ディスク</text>
+        <text class="id" x="299" y="466">SCSI\Disk&amp;Ven_…</text>
+        <path class="edge" d="M400 422 V394" marker-end="url(#up)"/>
+        <path class="edge" d="M400 334 V306" marker-end="url(#up)"/>
+        <path class="edge" d="M400 246 V218" marker-end="url(#up)"/>
+
+        <!-- column 3 -->
+        <rect class="b" x="550" y="334" width="230" height="58" rx="6"/>
+        <text class="t" x="564" y="358">NVMe コントローラー</text>
+        <text class="id" x="564" y="378">PCI\VEN_…&amp;DEV_…</text>
+        <rect class="b-disk" x="550" y="422" width="230" height="58" rx="6"/>
+        <text class="t" x="564" y="446">ディスク</text>
+        <text class="id" x="564" y="466">SCSI\Disk&amp;Ven_NVMe&amp;…</text>
+        <path class="edge" d="M665 422 V394" marker-end="url(#up)"/>
+
+        <!-- same-prefix bracket -->
+        <path class="edge-warn" d="M295 492 V500 H770 V492"/>
+        <text class="warn-t mid" x="532" y="522">ID の先頭はどちらも SCSI\Disk&amp;… なので、文字列では区別できない</text>
+
+        <!-- results -->
+        <rect class="b-ok" x="20" y="546" width="230" height="38" rx="19"/>
+        <text class="ok-t mid" x="135" y="570">USB デバイス本体に届く</text>
+        <rect class="b-ok" x="285" y="546" width="230" height="38" rx="19"/>
+        <text class="ok-t mid" x="400" y="570">USB デバイス本体に届く</text>
+        <rect class="b-mute" x="550" y="546" width="230" height="38" rx="19"/>
+        <text class="ts mid" x="665" y="570">USB が途中にない</text>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i class="sw sw-hub"></i>ハブ</span>
+      <span><i class="sw sw-usb"></i>USB デバイス本体（ハブの直下）</span>
+      <span><i class="sw sw-disk"></i>ディスク（ここから調べ始める）</span>
+      <span>↑ 親（<code>CM_Get_Parent</code>）</span>
+    </div>
+    <figcaption>VID/PID は調査で使った実機の値です。ほかの ID は形だけを示しています。</figcaption>
+  </figure>
+
+  <h3>USB ストレージには 2 つの転送方式がある</h3>
+  <p>USB ストレージは、中身は SCSI コマンドで、それを USB でどう運ぶかに 2 種類あります。方式によって Windows が使うドライバーが変わり、ディスクの ID の形まで変わります。</p>
+  <div class="two">
+    <div class="card">
+      <span class="tag">BOT · Bulk-Only Transport</span>
+      <p>昔からある方式です。ドライバーは <code>USBSTOR</code> で、ディスクの ID は <code>USBSTOR\Disk&amp;…</code> になります。ID を見れば USB と分かります。</p>
+    </div>
+    <div class="card">
+      <span class="tag">UAS · USB Attached SCSI</span>
+      <p>新しく速い方式です。ドライバーは <code>UASPStor</code> で、ディスクの ID は <strong><code>SCSI\Disk&amp;…</code></strong> になります。内蔵 NVMe と同じ形なので、ID だけでは USB と分かりません。</p>
+    </div>
+  </div>
+  <p>このため usbinfo は ID の文字列を見ず、<strong>親をたどって「親が USB ハブであるノード」があるか</strong>で USB 経由かどうかを決めます。ハブの直下にいるノードが USB デバイス本体です。この方法なら BOT、UAS、ハブ経由のどれでも同じように判定できます。</p>
+</section>
+
+<section>
+  <h2><span class="no">3</span>USB の情報は「親のハブ」に聞く</h2>
+  <p>USB 機器は自分の自己紹介データ（<strong>ディスクリプタ</strong>）を持っています。ベンダー ID、製品 ID、シリアル番号、機器の種類などが入った構造体です。ただし、アプリが機器から直接読むことはできません。機器がつながっている<strong>親のハブに、ポート番号を指定して問い合わせます</strong>。</p>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 770 280" role="img" aria-labelledby="t2">
+        <title id="t2">usbinfo が親ハブにポート番号を指定して IOCTL を送り、そのポートの機器の情報を受け取る様子</title>
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah-acc" d="M0 0 L10 5 L0 10 z"/></marker>
+          <marker id="arm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0 0 L10 5 L0 10 z"/></marker>
+        </defs>
+        <rect class="b-disk" x="20" y="92" width="150" height="92" rx="6"/>
+        <text class="t mid" x="95" y="130">usbinfo</text>
+        <text class="id mid" x="95" y="152">DeviceIoControl</text>
+
+        <rect class="b-hub" x="330" y="30" width="240" height="224" rx="8"/>
+        <text class="t" x="346" y="58">親のハブ</text>
+        <text class="id" x="346" y="78">\\?\USB#ROOT_HUB30#…</text>
+        <text class="lbl end" x="520" y="117">ポート 1</text>
+        <rect class="b-port" x="530" y="100" width="30" height="24" rx="3"/>
+        <text class="lbl end" x="520" y="155">ポート 2</text>
+        <rect class="b-port" x="530" y="138" width="30" height="24" rx="3"/>
+        <text class="t end" x="520" y="193">ポート 3</text>
+        <rect class="b-port b-port-on" x="530" y="176" width="30" height="24" rx="3"/>
+        <text class="lbl end" x="520" y="231">ポート 4</text>
+        <rect class="b-port" x="530" y="214" width="30" height="24" rx="3"/>
+
+        <path class="edge-acc" d="M560 188 H620"/>
+        <rect class="b-usb" x="620" y="160" width="130" height="56" rx="6"/>
+        <text class="t" x="634" y="184">USB 機器</text>
+        <text class="id" x="634" y="204">Address = 3</text>
+
+        <path class="edge-acc" d="M170 118 H328" marker-end="url(#ar)"/>
+        <text class="lbl mid" x="250" y="96">① ポート 3 を指定して</text>
+        <text class="lbl mid" x="250" y="110">IOCTL を送る</text>
+        <path class="edge" d="M330 160 H172" marker-end="url(#arm)"/>
+        <text class="lbl mid" x="250" y="180">② ディスクリプタ・速度・</text>
+        <text class="lbl mid" x="250" y="194">端子の種類が返る</text>
+      </svg>
+    </div>
+    <figcaption>ルートハブ（PC 本体の端子）も、内部的には 1 つのハブとして扱われます。</figcaption>
+  </figure>
+
+  <ol class="steps">
+    <li><span class="n">1</span><div class="body"><h3>親のハブを見つける</h3><p>USB 機器の devnode から親をたどり、ハブのデバイスインターフェイス（<code>CreateFile</code> できるパス）を得ます。</p><span class="api">CM_Get_Parent / GUID_DEVINTERFACE_USB_HUB</span></div></li>
+    <li><span class="n">2</span><div class="body"><h3>何番ポートに挿さっているかを調べる</h3><p>USB 機器の devnode のプロパティに、親ハブ上のポート番号が入っています。</p><span class="api">DEVPKEY_Device_Address</span></div></li>
+    <li class="main"><span class="n">3</span><div class="body"><h3>ハブを開いてポート番号付きで問い合わせる</h3><p>VID/PID、接続速度、デバイスアドレス、外部端子か Type-C か、製品名やシリアル番号の文字列が取れます。</p><span class="api">IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX<br>IOCTL_USB_GET_PORT_CONNECTOR_PROPERTIES<br>IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION</span></div></li>
+  </ol>
+</section>
+
+<section>
+  <h2><span class="no">4</span>処理の流れ</h2>
+  <p><code>wmain</code> の中身は次の 5 段階です。判定は 3 段目で行います。</p>
+  <ol class="steps">
+    <li><span class="n">1</span><div class="body"><h3>USB 機器を全部集める</h3><p>USB 機器を全部列挙し、前節の方法で各機器の情報を取ります。結果はキャッシュしておき、3 段目でディスクと結び付けるときに使います。</p><span class="api">GUID_DEVINTERFACE_USB_DEVICE → usbInfo()</span></div></li>
+    <li><span class="n">2</span><div class="body"><h3>周辺の情報を集める</h3><p>ボリューム（ドライブレター、ファイルシステム）、WMI（<code>Get-Disk</code> と同じ情報）、WPD（エクスプローラーの「ポータブル デバイス」）を集めます。</p><span class="api">FindFirstVolume / Win32_DiskDrive ほか / WPD クラスの devnode</span></div></li>
+    <li class="main"><span class="n">3</span><div class="body"><h3>ディスクを 1 台ずつ調べて判定する</h3><p>ディスク、光学ドライブ、フロッピーを列挙します。各ドライブについて、ストレージ IOCTL でバス種別や容量を取り、devnode の親をたどって USB デバイス本体を探し、判定します。ドライブはアクセス権 0 で開くので、中身を読めない壊れたディスクでも判定できます。</p><span class="api">processDisk() / IOCTL_STORAGE_QUERY_PROPERTY ほか</span></div></li>
+    <li><span class="n">4</span><div class="body"><h3>ボリュームからも対応付ける</h3><p>ボリュームを起点にした場合に、どのディスクのどの判定結果になるかを一覧にします。</p><span class="api">GUID_DEVINTERFACE_VOLUME → IOCTL_STORAGE_GET_DEVICE_NUMBER</span></div></li>
+    <li><span class="n">5</span><div class="body"><h3>出力する</h3><p><code>text</code> / <code>json</code> は全情報、<code>csv</code> はディスク 1 台 1 行の比較表だけを出します。<code>lsusb</code> / <code>lsusb-tree</code> を選んだときは 1〜4 を飛ばし、USB の接続ツリーだけを表示します。</p></div></li>
+  </ol>
+</section>
+
+<section>
+  <h2><span class="no">5</span>判定のフロー</h2>
+  <p>各ドライブの <code>verdict</code> は次の順番で決まります（<code>processDisk()</code> の判定部分と同じ順序です）。A・J・C の 3 つをすべて通ったものだけが判定対象のストレージになります。</p>
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 820 560" role="img" aria-labelledby="t3">
+        <title id="t3">verdict を決める判定フロー</title>
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0 0 L10 5 L0 10 z"/></marker>
+        </defs>
+
+        <!-- Q1 -->
+        <rect class="b-q" x="20" y="20" width="320" height="64" rx="6"/>
+        <text class="t" x="36" y="46">A：親をたどると USB デバイス本体に届く？</text>
+        <text class="id" x="36" y="68">CM_Get_Parent をルートまで繰り返す</text>
+
+        <path class="edge" d="M340 52 H438" marker-end="url(#fa)"/>
+        <text class="lbl mid" x="390" y="44">いいえ</text>
+
+        <!-- Q1b -->
+        <rect class="b-q" x="440" y="20" width="260" height="64" rx="6"/>
+        <text class="t" x="456" y="46">B：BusType が Usb？</text>
+        <text class="id" x="456" y="68">STORAGE_DEVICE_DESCRIPTOR</text>
+        <path class="edge" d="M570 84 V106 H505 V128" marker-end="url(#fa)"/>
+        <path class="edge" d="M570 106 H710 V128" marker-end="url(#fa)"/>
+        <text class="lbl" x="512" y="122">はい</text>
+        <text class="lbl" x="717" y="122">いいえ</text>
+        <rect class="b-warn" x="410" y="130" width="190" height="54" rx="6"/>
+        <text class="code mid" x="505" y="153">BUSTYPE_USB_ONLY(check)</text>
+        <text class="ts mid" x="505" y="173">要確認</text>
+        <rect class="b-mute" x="620" y="130" width="180" height="54" rx="6"/>
+        <text class="code mid" x="710" y="153">NOT_USB</text>
+        <text class="ts mid" x="710" y="173">USB 経由ではない</text>
+
+        <!-- Q1 yes -->
+        <path class="edge" d="M180 84 V228" marker-end="url(#fa)"/>
+        <text class="lbl" x="188" y="160">はい</text>
+
+        <!-- Q2 -->
+        <rect class="b-q" x="20" y="230" width="320" height="64" rx="6"/>
+        <text class="t" x="36" y="256">J：どの種類として列挙された？</text>
+        <text class="id" x="36" y="278">GUID_DEVINTERFACE_DISK / CDROM / FLOPPY</text>
+        <path class="edge" d="M340 262 H385 V227 H428" marker-end="url(#fa)"/>
+        <path class="edge" d="M385 262 V297 H428" marker-end="url(#fa)"/>
+        <text class="lbl-mono" x="392" y="221">CDROM</text>
+        <text class="lbl-mono" x="390" y="291">FLOPPY</text>
+        <rect class="b-mute" x="430" y="200" width="270" height="54" rx="6"/>
+        <text class="code mid" x="565" y="223">USB_OPTICAL_DRIVE(excluded)</text>
+        <text class="ts mid" x="565" y="243">BD / DVD / CD は対象外</text>
+        <rect class="b-warn" x="430" y="270" width="270" height="54" rx="6"/>
+        <text class="code mid" x="565" y="293">USB_FLOPPY_DRIVE</text>
+        <text class="ts mid" x="565" y="313">対象にするかは要件次第なので分けている</text>
+
+        <!-- Q2 disk -->
+        <path class="edge" d="M180 294 V368" marker-end="url(#fa)"/>
+        <text class="lbl-mono" x="188" y="336">DISK</text>
+
+        <!-- Q3 -->
+        <rect class="b-q" x="20" y="370" width="320" height="64" rx="6"/>
+        <text class="t" x="36" y="396">C：取り外しポリシーが ExpectNoRemoval 以外？</text>
+        <text class="id" x="36" y="418">DEVPKEY_Device_RemovalPolicy</text>
+        <path class="edge" d="M340 402 H428" marker-end="url(#fa)"/>
+        <text class="lbl mid" x="385" y="394">いいえ</text>
+        <rect class="b-warn" x="430" y="375" width="270" height="54" rx="6"/>
+        <text class="code mid" x="565" y="398">USB_NON_REMOVABLE(internal?)</text>
+        <text class="ts mid" x="565" y="418">内蔵カードリーダーなどの可能性</text>
+
+        <path class="edge" d="M180 434 V478" marker-end="url(#fa)"/>
+        <text class="lbl" x="188" y="462">はい</text>
+
+        <rect class="b-okstrong" x="20" y="480" width="320" height="64" rx="8"/>
+        <text class="code-big mid" x="180" y="508">USB_REMOVABLE_STORAGE</text>
+        <text class="ok-t mid" x="180" y="530">判定対象のストレージ</text>
+      </svg>
+    </div>
+    <figcaption>B（BusType）は判定には使わず、A で USB が見つからなかったときの確認用です。各条件の結果は出力の <code>judgement</code> に個別に入るので、どこで外れたかを後から確認できます。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="no">6</span>なぜ 1 つの値では判定できないのか</h2>
+  <p>よく使われる値を 1 つだけ使って判定した場合に、実機で当たったか（○）外れたか（×）を並べました。どの値にも外れる機器があります。3 つの条件を組み合わせた右端の列だけが全部当たります。</p>
+  <div class="tbl">
+    <table>
+      <thead>
+        <tr>
+          <th>機器</th>
+          <th>期待</th>
+          <th><code>BusType</code> が Usb</th>
+          <th><code>GetDriveType</code> が REMOVABLE</th>
+          <th><code>RemovableMedia</code> ビット</th>
+          <th>WPD に出る</th>
+          <th>取り外しポリシー</th>
+          <th>A∧J∧C</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><th>内蔵 NVMe SSD</th><td><span class="exp exp-out">対象外</span></td>
+          <td class="c ok">Nvme</td><td class="c ok">FIXED</td><td class="c ok">false</td><td class="c ok">なし</td><td class="c ok">NoRemoval</td><td class="c ok combo">NOT_USB</td></tr>
+        <tr><th>ポータブル SSD（UAS、APFS）</th><td><span class="exp exp-in">対象</span></td>
+          <td class="c ok">Usb</td><td class="c ng">レターなし</td><td class="c ng">false</td><td class="c ng">なし</td><td class="c ok">Surprise</td><td class="c ok combo">REMOVABLE</td></tr>
+        <tr><th>USB-SATA 変換（BOT、NTFS）</th><td><span class="exp exp-in">対象</span></td>
+          <td class="c ok">Usb</td><td class="c ng">FIXED</td><td class="c ng">false</td><td class="c ok">あり</td><td class="c ok">Surprise</td><td class="c ok combo">REMOVABLE</td></tr>
+        <tr><th>NVMe ケース（UAS、読めない）</th><td><span class="exp exp-in">対象</span></td>
+          <td class="c ok">Usb</td><td class="c ng">レターなし</td><td class="c ng">false</td><td class="c ng">なし</td><td class="c ok">Surprise</td><td class="c ok combo">REMOVABLE</td></tr>
+        <tr><th>外付け BD ドライブ</th><td><span class="exp exp-out">対象外</span></td>
+          <td class="c ng">Usb</td><td class="c ok">CDROM</td><td class="c ng">true</td><td class="c ok">なし</td><td class="c ng">Surprise</td><td class="c ok combo">OPTICAL</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="two">
+    <div class="card"><h3><code>GetDriveType</code> と <code>RemovableMedia</code></h3><p>名前に反して「<strong>メディア</strong>が抜けるか」（カードやディスクを入れ替えられるか）という意味です。USB の SSD は機器ごと抜くものなので「固定」と答え、BD ドライブは「抜ける」と答えます。判定したいことと逆になります。</p></div>
+    <div class="card"><h3>WPD（ポータブル デバイス）</h3><p>Windows が読めるファイルシステムをマウントしたときにだけ現れます。Mac 用にフォーマットしたディスクや、未フォーマットのディスクは出ません。</p></div>
+    <div class="card"><h3><code>BusType</code> と取り外しポリシー</h3><p>どちらも USB の SSD には正しく当たりますが、BD ドライブも「USB で取り外せる」と答えます。光学ドライブを外すには、ディスクとして列挙されたかどうか（J）を組み合わせる必要があります。</p></div>
+    <div class="card"><h3>読めないディスクでも判定できる</h3><p>A・J・C はどれも devnode と列挙の情報で、ディスクの中身を読みません。容量すら取れない NVMe ケースでも正しく判定できました。</p></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">7</span>内蔵か外付けかを見分ける補助情報</h2>
+  <p>USB でつながっていても PC に内蔵されている機器があります（Bluetooth アダプター、内蔵カメラ、ノート PC の内蔵カードリーダーなど）。USB デバイス本体については、次の 3 つの値が参考になります。今回の実機では、外付け機器と内蔵機器がきれいに分かれました。</p>
+  <div class="tbl">
+    <table style="min-width: 560px">
+      <thead><tr><th>値</th><th>意味</th><th>外付け機器</th><th>内蔵機器</th></tr></thead>
+      <tbody>
+        <tr><th><code>capRemovable</code></th><td>機器が親から取り外せる扱いか</td><td class="c">true</td><td class="c">false</td></tr>
+        <tr><th><code>inLocalMachineContainer</code></th><td>PC 本体と同じ「物理的な箱」に属するか</td><td class="c">false</td><td class="c">true</td></tr>
+        <tr><th><code>portUserConnectable</code></th><td>挿さっているのが外に出ている端子か</td><td class="c">true</td><td class="c">false</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>これらは PC のファームウェア（ACPI）の記述をもとにしているので、記述が不正確な機種では内蔵機器が外付けと報告されることがあります。</p>
+</section>
+
+<section>
+  <h2><span class="no">8</span>ボリュームからたどるときの落とし穴</h2>
+  <p>ドライブレターなどのボリュームから判定したい場合は、ボリュームに <code>IOCTL_STORAGE_GET_DEVICE_NUMBER</code> を送ってディスク番号を得て、そのディスクの判定結果を使います。ボリュームの devnode の親をたどってもボリュームマネージャーに行き着くだけで、USB には届かないためです。</p>
+  <div class="map">
+    <div class="row">
+      <span class="chip">STORAGE\Volume\…</span><span class="arrow">→ IOCTL →</span><span class="chip hl">Disk, 1</span><span class="arrow">→</span><span class="chip">\\.\PhysicalDrive1</span>
+      <span class="note">通常のボリュームは、種類と番号でディスクと正しく対応付けられます。</span>
+    </div>
+    <div class="row bad">
+      <span class="chip">フロッピーのボリューム</span><span class="arrow">→ IOCTL →</span><span class="chip hl">Disk, 0</span><span class="arrow">→</span><span class="chip">\\.\PhysicalDrive0 ?</span>
+      <span class="note">フロッピーも種類が「ディスク」で返り、番号はフロッピーの通し番号です。番号で探すと、無関係な PhysicalDrive0 に結び付いてしまいます。フロッピーはボリュームの devnode 自身から親をたどります。</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">9</span>用語</h2>
+  <dl>
+    <dt>devnode</dt><dd>デバイスの木の 1 ノード。<code>CM_Get_Parent</code> で親をたどれる。</dd>
+    <dt>インスタンス ID</dt><dd>devnode の ID 文字列。先頭はそのノードを作ったバスドライバー（<code>USB\</code>、<code>USBSTOR\</code>、<code>SCSI\</code> など）。</dd>
+    <dt>デバイスインターフェイス</dt><dd>「ディスク」「USB 機器」などの種類ごとの GUID。これで列挙すると、その種類の機器を <code>CreateFile</code> で開けるパスが得られる。</dd>
+    <dt>IOCTL</dt><dd><code>DeviceIoControl()</code> でドライバーに送る問い合わせコマンド。</dd>
+    <dt>ハブ / ポート</dt><dd>ハブは USB の分岐点で、PC 本体の端子もルートハブという 1 つのハブ。ポートはハブの差し込み口で、1 から番号が付く。</dd>
+    <dt>ディスクリプタ</dt><dd>USB 機器が持つ自己紹介の構造体。VID/PID、シリアル番号、機器の種類などが入っている。</dd>
+    <dt>VID / PID</dt><dd>ベンダー ID と製品 ID（各 16 ビット）。<code>152d:2329</code> のように書き、メーカーと機種を表す。</dd>
+    <dt>BOT / UAS</dt><dd>USB ストレージの転送方式。BOT は <code>USBSTOR</code>、UAS は <code>UASPStor</code> ドライバーで動く。</dd>
+    <dt>取り外しポリシー</dt><dd>OS がその機器の取り外しをどう想定しているか。<code>ExpectNoRemoval</code>（外さない）、<code>ExpectOrderlyRemoval</code>、<code>ExpectSurpriseRemoval</code>（いつ抜かれてもよい）の 3 つ。</dd>
+  </dl>
+</section>
+
+<section>
+  <h2><span class="no">10</span>まだ確かめていないこと</h2>
+  <p>調査は Windows 11 のデスクトップ PC 1 台で行いました。次の条件は試していないので、判定方法を採用する前に実機で <code>verdict</code> を確認してください。</p>
+  <ul>
+    <li>Windows 10 での動作</li>
+    <li>USB メモリ、カードリーダー（メディアあり・なし、複数スロット）</li>
+    <li>ノート PC の内蔵カードリーダーなど、内蔵の USB 接続ストレージ</li>
+    <li>eSATA や SD ホストコントローラーなど、USB 以外の取り外し可能ストレージ</li>
+    <li>ベンダー製ドライバーを使う USB ストレージ</li>
+    <li>メディアを入れた光学ドライブ、スマートフォンなどの MTP 機器</li>
+    <li>ほかの機種の PC（ACPI の記述の違い）</li>
+  </ul>
+</section>
+
+<footer>出典: usbinfo リポジトリの README.md、docs/findings.md、usbinfo.cpp（2026-11 時点）</footer>
+</div>
+</body>
+</html>
