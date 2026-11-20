@@ -19,6 +19,7 @@
 #include <winioctl.h>   // DEFINE_DEVPROPKEY 定義後に取り込むと DEVPKEY_Storage_* も定義される
 #include <ntddscsi.h>
 #include <cfgmgr32.h>
+#include <setupapi.h>
 #include <usbiodef.h>
 #include <usbioctl.h>
 #include <objbase.h>
@@ -36,6 +37,7 @@
 #include <vector>
 
 #pragma comment(lib, "cfgmgr32.lib")
+#pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "wbemuuid.lib")
@@ -1362,6 +1364,7 @@ struct Options {
     std::wstring outFile;
     bool wmi = true;
     bool allProps = true;
+    bool excludeInternalUsb = false;
 };
 
 struct WmiData {
@@ -1622,6 +1625,348 @@ static DiskResult processDisk(const std::wstring& ifPath, DevKind kind, const Op
 }
 
 // ---------------------------------------------------------------------------
+// ドライブレターの抽出 (既存方式の再現と新方式)
+//
+// どちらも結果は「ドライブレター index (A = 0) と devinst の組」のリストで、既存コードと同じ形にしている。
+// devinst は GUID_DEVINTERFACE_VOLUME を SetupDi で列挙したときの SP_DEVINFO_DATA.DevInst
+// (ボリュームのインターフェイスを持つ devnode)。
+// この namespace は usbinfo の他の部分に依存しないので、そのまま移植できる。
+// trace 引数は usbinfo の比較表示用で、移植先では省略 (nullptr) してよい。
+// ---------------------------------------------------------------------------
+
+namespace drivesel {
+
+struct DriveEntry {
+    int driveIndex;     // 0 = A:, 1 = B:, ...
+    DEVINST devInst;    // ボリュームのインターフェイスを持つ devnode
+};
+
+static std::wstring deviceId(DEVINST di)
+{
+    wchar_t buf[MAX_DEVICE_ID_LEN + 1] = L"";
+    if (CM_Get_Device_IDW(di, buf, _countof(buf), 0) != CR_SUCCESS) return L"";
+    return buf;
+}
+
+// DevicePath を取得する (SetupDiGetDeviceInterfaceDetail の 2 段階呼び出し)
+static bool interfaceDetail(HDEVINFO h, SP_DEVICE_INTERFACE_DATA& ifData, std::wstring& path, SP_DEVINFO_DATA* info)
+{
+    DWORD need = 0;
+    SetupDiGetDeviceInterfaceDetailW(h, &ifData, nullptr, 0, &need, nullptr);
+    if (need < sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)) return false;
+    std::vector<BYTE> buf(need);
+    auto* d = (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)buf.data();
+    d->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+    if (!SetupDiGetDeviceInterfaceDetailW(h, &ifData, d, need, nullptr, info)) return false;
+    path = d->DevicePath;
+    return true;
+}
+
+// devicePath (末尾の \ なし) からボリューム GUID パス "\\?\Volume{GUID}\" を得る
+static std::wstring volumeGuidOf(const std::wstring& devicePath)
+{
+    wchar_t guid[MAX_PATH] = L"";
+    if (!GetVolumeNameForVolumeMountPointW((devicePath + L"\\").c_str(), guid, _countof(guid))) return L"";
+    return guid;
+}
+
+// =====================================================================
+// 既存方式 (現行コードの再現)
+//   1. A:〜Z: のうち GetDriveType が DRIVE_REMOVABLE のものについて、ボリューム GUID を控える
+//   2. GUID_DEVINTERFACE_VOLUME を列挙し、devnode の ID が "USBSTOR#" を含むか、
+//      親の ID が "USBSTOR\" を含むものを USB とみなす
+//   3. そのボリューム GUID が 1. のどれかと一致したら採用
+// =====================================================================
+
+struct LegacyTrace {
+    DEVINST devInst = 0;
+    std::wstring instanceId, parentInstanceId, volumeGuid;
+    bool idHasUsbstorHash = false, parentHasUsbstor = false;
+};
+
+static std::vector<DriveEntry> SelectDrivesLegacy(std::vector<LegacyTrace>* trace = nullptr)
+{
+    struct VolumeInfo { int index; std::wstring guid; };
+    std::vector<VolumeInfo> volumeInfos;
+    for (int i = 0; i < 26; ++i) {
+        wchar_t root[] = { (wchar_t)(L'A' + i), L':', L'\\', 0 };
+        if (GetDriveTypeW(root) != DRIVE_REMOVABLE) continue;
+        wchar_t guid[MAX_PATH] = L"";
+        if (!GetVolumeNameForVolumeMountPointW(root, guid, _countof(guid))) continue;
+        volumeInfos.push_back({ i, guid });
+    }
+
+    std::vector<DriveEntry> result;
+    HDEVINFO h = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_VOLUME, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (h == INVALID_HANDLE_VALUE) return result;
+    for (DWORD index = 0;; ++index) {
+        SP_DEVICE_INTERFACE_DATA ifData = { sizeof(ifData) };
+        if (!SetupDiEnumDeviceInterfaces(h, nullptr, &GUID_DEVINTERFACE_VOLUME, index, &ifData)) break;
+        SP_DEVINFO_DATA info = { sizeof(info) };
+        DWORD need = 0;
+        SetupDiGetDeviceInterfaceDetailW(h, &ifData, nullptr, 0, &need, &info);   // detail は取らず info だけ得る
+
+        std::wstring id = deviceId(info.DevInst), parentId;
+        DEVINST parent = 0;
+        if (CM_Get_Parent(&parent, info.DevInst, 0) == CR_SUCCESS) parentId = deviceId(parent);
+        bool idHit = id.find(L"USBSTOR#") != std::wstring::npos;
+        bool parentHit = parentId.find(L"USBSTOR\\") != std::wstring::npos;
+
+        if (trace) {   // 比較表示のため、USB と判定しなかったものも GUID を控える (選択結果には影響しない)
+            LegacyTrace t;
+            t.devInst = info.DevInst; t.instanceId = id; t.parentInstanceId = parentId;
+            t.idHasUsbstorHash = idHit; t.parentHasUsbstor = parentHit;
+            std::wstring path;
+            if (interfaceDetail(h, ifData, path, nullptr)) t.volumeGuid = volumeGuidOf(path);
+            trace->push_back(std::move(t));
+        }
+        if (!idHit && !parentHit) continue;
+
+        std::wstring path;
+        if (!interfaceDetail(h, ifData, path, nullptr)) continue;
+        std::wstring guid = volumeGuidOf(path);
+        if (guid.empty()) continue;
+        for (auto& v : volumeInfos)
+            if (v.guid == guid) result.push_back({ v.index, info.DevInst });
+    }
+    SetupDiDestroyDeviceInfoList(h);
+    return result;
+}
+
+// =====================================================================
+// 新方式
+//   1. A:〜Z: の全ドライブについてボリューム GUID を控える (GetDriveType では絞らない)
+//   2. GUID_DEVINTERFACE_DISK を列挙し、ディスク番号 → ディスクの devnode の表を作る
+//   3. GUID_DEVINTERFACE_VOLUME を列挙し、ドライブレターを持つボリュームについて
+//      a. devnode の ID が STORAGE\Volume\ で始まる (= ディスク上のボリューム。光学ドライブ・フロッピーは除外)
+//      b. IOCTL_STORAGE_GET_DEVICE_NUMBER の DeviceType が FILE_DEVICE_DISK で、2. の表にあるディスクに対応する
+//      c. ディスクの devnode から親をたどると、親が USB ハブのノード (= USB デバイス本体) がある
+//      d. ディスクの devnode の取り外しポリシーが ExpectNoRemoval 以外
+//      e. (excludeInternalUsb のときのみ) USB デバイス本体に CM_DEVCAP_REMOVABLE が立っている
+//      をすべて満たせば採用
+// =====================================================================
+
+struct NewTrace {
+    DEVINST devInst = 0;
+    std::wstring instanceId, volumeGuid;
+    bool hasDeviceNumber = false;
+    STORAGE_DEVICE_NUMBER deviceNumber = {};
+    DEVINST diskDevInst = 0;
+    std::wstring diskInstanceId, diskName, usbInstanceId;
+    int removalPolicy = -1, usbCapRemovable = -1, usbInLocalMachineContainer = -1;
+    const wchar_t* result = L"";   // 採用 / 除外の理由
+};
+
+static bool getU32(DEVINST di, const DEVPROPKEY& key, DWORD& out)
+{
+    DEVPROPTYPE type = 0;
+    ULONG size = sizeof(out);
+    return CM_Get_DevNode_PropertyW(di, &key, &type, (PBYTE)&out, &size, 0) == CR_SUCCESS && type == DEVPROP_TYPE_UINT32;
+}
+
+static bool isUsbHubNode(DEVINST di)
+{
+    std::wstring id = deviceId(di);
+    ULONG len = 0;
+    if (id.empty() ||
+        CM_Get_Device_Interface_List_SizeW(&len, const_cast<LPGUID>(&GUID_DEVINTERFACE_USB_HUB), const_cast<DEVINSTID_W>(id.c_str()),
+                                           CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS) return false;
+    return len > 1;   // インターフェイスがなくても終端の NUL 1 文字ぶんが返る
+}
+
+// 親をたどり、親が USB ハブであるノード (USB デバイス本体) を返す。なければ 0
+static DEVINST findUsbDevice(DEVINST di)
+{
+    DEVINST cur = di, parent = 0;
+    while (CM_Get_Parent(&parent, cur, 0) == CR_SUCCESS) {
+        if (isUsbHubNode(parent)) return cur;
+        cur = parent;
+    }
+    return 0;
+}
+
+static bool getDeviceNumber(const std::wstring& path, STORAGE_DEVICE_NUMBER& dn)
+{
+    HANDLE f = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD ret = 0;
+    BOOL ok = DeviceIoControl(f, IOCTL_STORAGE_GET_DEVICE_NUMBER, nullptr, 0, &dn, sizeof(dn), &ret, nullptr);
+    CloseHandle(f);
+    return ok != FALSE;
+}
+
+static std::vector<DriveEntry> SelectDrivesNew(bool excludeInternalUsb = false, std::vector<NewTrace>* trace = nullptr)
+{
+    std::vector<std::pair<int, std::wstring>> letters;   // (ドライブ index, ボリューム GUID パス)
+    for (int i = 0; i < 26; ++i) {
+        wchar_t root[] = { (wchar_t)(L'A' + i), L':', L'\\', 0 };
+        wchar_t guid[MAX_PATH] = L"";
+        if (GetVolumeNameForVolumeMountPointW(root, guid, _countof(guid))) letters.emplace_back(i, guid);
+    }
+
+    std::map<DWORD, DEVINST> disks;   // ディスク番号 → ディスクの devnode
+    HDEVINFO hd = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_DISK, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (hd != INVALID_HANDLE_VALUE) {
+        for (DWORD index = 0;; ++index) {
+            SP_DEVICE_INTERFACE_DATA ifData = { sizeof(ifData) };
+            if (!SetupDiEnumDeviceInterfaces(hd, nullptr, &GUID_DEVINTERFACE_DISK, index, &ifData)) break;
+            SP_DEVINFO_DATA info = { sizeof(info) };
+            std::wstring path;
+            STORAGE_DEVICE_NUMBER dn = {};
+            if (interfaceDetail(hd, ifData, path, &info) && getDeviceNumber(path, dn) && dn.DeviceType == FILE_DEVICE_DISK)
+                disks[dn.DeviceNumber] = info.DevInst;
+        }
+        SetupDiDestroyDeviceInfoList(hd);
+    }
+
+    std::vector<DriveEntry> result;
+    HDEVINFO h = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_VOLUME, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (h == INVALID_HANDLE_VALUE) return result;
+    for (DWORD index = 0;; ++index) {
+        SP_DEVICE_INTERFACE_DATA ifData = { sizeof(ifData) };
+        if (!SetupDiEnumDeviceInterfaces(h, nullptr, &GUID_DEVINTERFACE_VOLUME, index, &ifData)) break;
+        SP_DEVINFO_DATA info = { sizeof(info) };
+        std::wstring path;
+        if (!interfaceDetail(h, ifData, path, &info)) continue;
+
+        NewTrace t;
+        t.devInst = info.DevInst;
+        t.instanceId = deviceId(info.DevInst);
+        t.volumeGuid = volumeGuidOf(path);
+        std::vector<int> indexes;
+        for (auto& l : letters)
+            if (!t.volumeGuid.empty() && _wcsicmp(l.second.c_str(), t.volumeGuid.c_str()) == 0) indexes.push_back(l.first);
+
+        auto finish = [&](const wchar_t* why) { t.result = why; if (trace) trace->push_back(t); };
+        if (indexes.empty()) { finish(L"no drive letter"); continue; }
+        // 光学ドライブやフロッピーのボリュームは、ドライブ自身の devnode がインターフェイスを持つ。
+        // フロッピーは DeviceType が FILE_DEVICE_DISK で番号がハードディスクと衝突するので、番号で探す前に除外する。
+        if (_wcsnicmp(t.instanceId.c_str(), L"STORAGE\\Volume\\", 15) != 0) { finish(L"not a disk volume (optical/floppy)"); continue; }
+        t.hasDeviceNumber = getDeviceNumber(path, t.deviceNumber);
+        if (!t.hasDeviceNumber) { finish(L"IOCTL_STORAGE_GET_DEVICE_NUMBER failed (spanned volume?)"); continue; }
+        if (t.deviceNumber.DeviceType != FILE_DEVICE_DISK) { finish(L"not FILE_DEVICE_DISK"); continue; }
+        auto it = disks.find(t.deviceNumber.DeviceNumber);
+        if (it == disks.end()) { finish(L"disk not found"); continue; }
+        t.diskDevInst = it->second;
+        t.diskInstanceId = deviceId(t.diskDevInst);
+        {
+            wchar_t name[256] = L"";
+            DEVPROPTYPE type = 0;
+            ULONG size = sizeof(name);
+            if (CM_Get_DevNode_PropertyW(t.diskDevInst, &DEVPKEY_NAME, &type, (PBYTE)name, &size, 0) == CR_SUCCESS && type == DEVPROP_TYPE_STRING)
+            {
+                t.diskName = name;   // 先頭に空白が入る機器がある (例: " USB  SanDisk 3.2Gen1 USB Device")
+                size_t a = t.diskName.find_first_not_of(L' ');
+                t.diskName = a == std::wstring::npos ? L"" : t.diskName.substr(a, t.diskName.find_last_not_of(L' ') - a + 1);
+            }
+        }
+        DWORD policy = 0;
+        if (getU32(t.diskDevInst, DEVPKEY_Device_RemovalPolicy, policy)) t.removalPolicy = (int)policy;
+
+        DEVINST usb = findUsbDevice(t.diskDevInst);
+        if (usb) {
+            t.usbInstanceId = deviceId(usb);
+            DWORD caps = 0;
+            if (getU32(usb, DEVPKEY_Device_Capabilities, caps)) t.usbCapRemovable = (caps & CM_DEVCAP_REMOVABLE) ? 1 : 0;
+            DEVPROPTYPE type = 0;
+            DEVPROP_BOOLEAN b = DEVPROP_FALSE;
+            ULONG size = sizeof(b);
+            if (CM_Get_DevNode_PropertyW(usb, &DEVPKEY_Device_InLocalMachineContainer, &type, (PBYTE)&b, &size, 0) == CR_SUCCESS && type == DEVPROP_TYPE_BOOLEAN)
+                t.usbInLocalMachineContainer = b != DEVPROP_FALSE ? 1 : 0;
+        }
+
+        if (!usb) { finish(L"not USB"); continue; }
+        if (t.removalPolicy < 0 || t.removalPolicy == CM_REMOVAL_POLICY_EXPECT_NO_REMOVAL) { finish(L"removal policy is ExpectNoRemoval"); continue; }
+        if (excludeInternalUsb && t.usbCapRemovable == 0) { finish(L"internal USB device (CM_DEVCAP_REMOVABLE off)"); continue; }
+        for (int i : indexes) result.push_back({ i, info.DevInst });
+        finish(L"selected");
+    }
+    SetupDiDestroyDeviceInfoList(h);
+    return result;
+}
+
+}   // namespace drivesel
+
+// 既存方式と新方式の結果を、ドライブレターごとに並べる
+static void compareDriveSelection(Node& arr, bool excludeInternalUsb)
+{
+    std::vector<drivesel::LegacyTrace> lt;
+    std::vector<drivesel::NewTrace> nt;
+    auto legacy = drivesel::SelectDrivesLegacy(&lt);
+    auto modern = drivesel::SelectDrivesNew(excludeInternalUsb, &nt);
+
+    for (int i = 0; i < 26; ++i) {
+        wchar_t root[] = { (wchar_t)(L'A' + i), L':', L'\\', 0 };
+        wchar_t guid[MAX_PATH] = L"";
+        if (!GetVolumeNameForVolumeMountPointW(root, guid, _countof(guid))) continue;
+        UINT dt = GetDriveTypeW(root);
+
+        const drivesel::DriveEntry* le = nullptr;
+        const drivesel::DriveEntry* ne = nullptr;
+        for (auto& e : legacy) if (e.driveIndex == i) { le = &e; break; }
+        for (auto& e : modern) if (e.driveIndex == i) { ne = &e; break; }
+        const drivesel::LegacyTrace* l = nullptr;
+        const drivesel::NewTrace* n = nullptr;
+        for (auto& t : lt) if (_wcsicmp(t.volumeGuid.c_str(), guid) == 0) { l = &t; break; }
+        for (auto& t : nt) if (_wcsicmp(t.volumeGuid.c_str(), guid) == 0) { n = &t; break; }
+
+        Node& r = arr.item();
+        r.str(L"drive", fmt(L"%c:", L'A' + i));
+        r.num(L"driveIndex", i);
+        const wchar_t* dtName = driveTypeName(dt);
+        r.str(L"driveType", wcsncmp(dtName, L"DRIVE_", 6) == 0 ? dtName + 6 : dtName);
+        r.str(L"volumeGuid", guid);
+        r.str(L"volumeInstanceId", n ? n->instanceId : l ? l->instanceId : L"(not found in GUID_DEVINTERFACE_VOLUME)");
+        r.str(L"legacy", le ? L"selected" : L"-");
+        r.str(L"new", ne ? L"selected" : L"-");
+        r.str(L"diff", le && ne ? (le->devInst == ne->devInst ? L"same" : L"same drive, different devinst") :
+                       le ? L"LEGACY ONLY" : ne ? L"NEW ONLY" : L"same");
+        Node& lo = r.obj(L"legacyDetail");
+        lo.boolean(L"driveTypeRemovable", dt == DRIVE_REMOVABLE);
+        if (l) {
+            lo.boolean(L"idHasUsbstorHash", l->idHasUsbstorHash);
+            lo.boolean(L"parentHasUsbstor", l->parentHasUsbstor);
+            lo.str(L"parentInstanceId", l->parentInstanceId);
+        }
+        Node& no = r.obj(L"newDetail");
+        if (n) {
+            no.str(L"result", n->result);
+            if (n->hasDeviceNumber)
+                no.str(L"deviceNumber", fmt(L"%s %lu (partition %lu)", deviceTypeName(n->deviceNumber.DeviceType).c_str(),
+                                            n->deviceNumber.DeviceNumber, n->deviceNumber.PartitionNumber));
+            if (n->diskDevInst) {
+                no.str(L"diskName", n->diskName);
+                no.str(L"diskInstanceId", n->diskInstanceId);
+                no.str(L"diskRemovalPolicy", n->removalPolicy < 0 ? L"?" : removalPolicyName((DWORD)n->removalPolicy));
+                no.str(L"usbDeviceInstanceId", n->usbInstanceId.empty() ? L"(none)" : n->usbInstanceId);
+                if (!n->usbInstanceId.empty()) {
+                    no.str(L"usbCapRemovable", tri(n->usbCapRemovable));
+                    no.str(L"usbInLocalMachineContainer", tri(n->usbInLocalMachineContainer));
+                }
+            }
+        } else no.str(L"result", L"(volume interface not found)");
+    }
+}
+
+// -f letters の 1 ドライブ 1 行の表
+static std::wstring lettersTable(const Node& arr)
+{
+    auto get = [](const Node& n, const wchar_t* k) -> std::wstring {
+        const Node* c = n.find(k);
+        return c ? c->val : L"";
+    };
+    std::wstring o = fmt(L"%-4s %-10s %-9s %-9s %-12s %-40s %s\n", L"Drv", L"DriveType", L"Legacy", L"New", L"Diff", L"New: result", L"Disk");
+    for (const Node& r : arr.kids) {
+        const Node* nd = r.find(L"newDetail");
+        std::wstring result = nd ? get(*nd, L"result") : L"";
+        std::wstring disk = nd ? get(*nd, L"diskName") : L"";
+        o += fmt(L"%-4s %-10s %-9s %-9s %-12s %-40s %s\n", get(r, L"drive").c_str(), get(r, L"driveType").c_str(),
+                 get(r, L"legacy").c_str(), get(r, L"new").c_str(), get(r, L"diff").c_str(), result.c_str(), disk.c_str());
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------------------
 // lsusb 風の表示
 // ---------------------------------------------------------------------------
 
@@ -1807,9 +2152,11 @@ static void usage()
         L"                                 csv           per-disk comparison summary only\n"
         L"                                 lsusb         one line per USB device, like lsusb\n"
         L"                                 lsusb-tree    USB topology tree, like lsusb -tv\n"
+        L"                                 letters       drive letters selected by the legacy and new logic\n"
         L"  -o, --out FILE               write UTF-8 output to FILE instead of stdout\n"
         L"      --no-wmi                 skip WMI queries\n"
         L"      --no-props               skip the full devnode property dump\n"
+        L"      --exclude-internal-usb   new logic: also drop USB devices without CM_DEVCAP_REMOVABLE\n"
         L"  -h, --help                   show this help\n",
         stderr);
 }
@@ -1825,14 +2172,21 @@ int wmain(int argc, wchar_t** argv)
         else if ((a == L"-o" || a == L"--out") && i + 1 < argc) opt.outFile = argv[++i];
         else if (a == L"--no-wmi") opt.wmi = false;
         else if (a == L"--no-props") opt.allProps = false;
+        else if (a == L"--exclude-internal-usb") opt.excludeInternalUsb = true;
         else { usage(); return (a == L"-h" || a == L"--help") ? 0 : 2; }
     }
     if (opt.format != L"text" && opt.format != L"json" && opt.format != L"csv" &&
-        opt.format != L"lsusb" && opt.format != L"lsusb-tree") { usage(); return 2; }
-    if (opt.format == L"lsusb" || opt.format == L"lsusb-tree")
-        return writeOutput(lsusb(opt.format == L"lsusb-tree"), opt.outFile, false);
+        opt.format != L"lsusb" && opt.format != L"lsusb-tree" && opt.format != L"letters") { usage(); return 2; }
 
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);   // メディアなしドライブのダイアログ抑止
+
+    if (opt.format == L"lsusb" || opt.format == L"lsusb-tree")
+        return writeOutput(lsusb(opt.format == L"lsusb-tree"), opt.outFile, false);
+    if (opt.format == L"letters") {
+        Node arr;
+        compareDriveSelection(arr, opt.excludeInternalUsb);
+        return writeOutput(lettersTable(arr), opt.outFile, false);
+    }
 
     Node root;
     root.str(L"tool", L"usbinfo 1.0");
@@ -1947,6 +2301,9 @@ int wmain(int argc, wchar_t** argv)
         n.str(L"mappedDisk", mapped.empty() ? L"(none)" : mapped);
         n.str(L"verdict", verdict.empty() ? L"(no disk)" : verdict);
     }
+
+    // --- ドライブレターごとの既存方式 / 新方式の比較 ---
+    compareDriveSelection(root.arr(L"driveLetters"), opt.excludeInternalUsb);
 
     // --- 出力 ---
     std::wstring out;

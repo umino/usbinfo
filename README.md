@@ -31,6 +31,7 @@ usbinfo [options]
 | `-o`, `--out FILE` | 標準出力の代わりに FILE へ書き出す。CSV のときは Excel で開けるよう BOM を付ける |
 | `--no-wmi` | WMI の問い合わせを省略する (実行が速くなる) |
 | `--no-props` | devnode の全プロパティダンプ (`allProperties`) を省略する |
+| `--exclude-internal-usb` | 新方式のドライブ抽出で、`CM_DEVCAP_REMOVABLE` が立っていない USB デバイス (内蔵扱い) も除外する |
 | `-h`, `--help` | ヘルプを表示する |
 
 | FORMAT | 内容 |
@@ -40,6 +41,7 @@ usbinfo [options]
 | `csv` | ディスク 1 台 1 行の比較表 (`summary`) だけを出力する |
 | `lsusb` | USB デバイスを 1 台 1 行で一覧する (Linux の `lsusb` 風) |
 | `lsusb-tree` | USB の接続ツリーを表示する (Linux の `lsusb -tv` 風) |
+| `letters` | ドライブレターごとに、既存方式と新方式で抽出されるかを並べる (「ドライブレターの抽出」を参照) |
 
 例:
 
@@ -102,6 +104,7 @@ Linux の `lsusb` との違い:
 | `usbDevices[]` | 全 USB デバイスの詳細。ストレージ以外も含む |
 | `wpdDevices[]` | デバイスマネージャーの「ポータブル デバイス」(WPD) に出ている全デバイスと、対応するディスク |
 | `volumeInterfaces[]` | `GUID_DEVINTERFACE_VOLUME` で列挙した全ボリュームと、対応するディスクの判定結果 |
+| `driveLetters[]` | ドライブレターごとの既存方式 / 新方式の抽出結果と、その根拠 (「ドライブレターの抽出」を参照) |
 
 ## summary の各列
 
@@ -357,6 +360,52 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 
 フロッピーを番号で対応付けてはいけない理由は、フロッピーのボリュームに `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行すると、`DeviceType` が `FILE_DEVICE_DISK`、`DeviceNumber` がフロッピーの通し番号 (`\Device\Floppy0` なら 0) になるためです。
 この番号はハードディスクの番号 (`PhysicalDrive0`) と区別がつかず、種類と番号だけで探すと `PhysicalDrive0` のディスクに誤って対応付けられます。
+
+## ドライブレターの抽出 (既存方式と新方式の比較)
+
+`usbinfo.cpp` の `namespace drivesel` に、「リムーバブルな USB ストレージのドライブレター」を抽出する関数を 2 つ用意しています。
+どちらも結果は `DriveEntry { int driveIndex; DEVINST devInst; }` のリストで、既存コードの出力 (ドライブレター index と devinst の組) と同じ形です。
+`devInst` は `GUID_DEVINTERFACE_VOLUME` を SetupDi で列挙したときの `SP_DEVINFO_DATA.DevInst` です。
+この namespace は usbinfo の他の部分に依存しないので、そのまま移植できます (`setupapi.lib` と `cfgmgr32.lib` が必要)。
+
+| 関数 | 内容 |
+|---|---|
+| `SelectDrivesLegacy()` | 既存方式の再現。`GetDriveType` が `DRIVE_REMOVABLE` のドライブのうち、ボリュームの devnode の ID が `USBSTOR#` を含むか、親の ID が `USBSTOR\` を含むもの |
+| `SelectDrivesNew(excludeInternalUsb)` | 新方式。下記の条件をすべて満たすもの |
+
+新方式の条件:
+
+1. ドライブレターを持つボリュームである (`GetDriveType` では絞らない)。
+2. ボリュームの devnode の ID が `STORAGE\Volume\` で始まる。光学ドライブとフロッピーはここで外れる。
+3. ボリュームに `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行し、`DeviceType` が `FILE_DEVICE_DISK` で、同じ番号のディスク (`GUID_DEVINTERFACE_DISK`) がある。
+4. ディスクの devnode から親をたどると、親が USB ハブのノード (USB デバイス本体) がある。
+5. ディスクの devnode の取り外しポリシーが `ExpectNoRemoval` 以外である。
+6. (`excludeInternalUsb` が true のときのみ) USB デバイス本体に `CM_DEVCAP_REMOVABLE` が立っている。
+
+既存方式との違い:
+
+| ケース | 既存方式 | 新方式 |
+|---|---|---|
+| USB メモリ、USB カードリーダー | 抽出する | 抽出する |
+| USB の HDD/SSD (`DRIVE_FIXED`) | 抽出しない | 抽出する |
+| UAS 接続の機器 (ID が `SCSI\Disk&...`) | 抽出しない | 抽出する |
+| ノート PC の内蔵 USB カードリーダー | 抽出する | 取り外しポリシー次第。`excludeInternalUsb` で除外できる |
+
+`-f letters` で両方式の結果を 1 ドライブ 1 行で比べられます。
+
+```
+Drv  DriveType  Legacy    New       Diff         New: result                              Disk
+C:   FIXED      -         -         same         not USB                                  CT1000P310SSD8
+```
+
+| 列 | 意味 |
+|---|---|
+| `Legacy` / `New` | その方式で抽出されれば `selected` |
+| `Diff` | `same` (結果が同じ)、`LEGACY ONLY`、`NEW ONLY` |
+| `New: result` | 新方式で抽出した、または除外した理由 |
+| `Disk` | ボリュームが載っているディスクの名前 |
+
+`-f json` / `-f text` の `driveLetters[]` には、`legacyDetail` (既存方式が見ている各チェックの結果) と `newDetail` (ディスク番号、ディスクと USB デバイス本体のインスタンス ID、取り外しポリシー、`capRemovable`、`inLocalMachineContainer`) も出力します。
 
 ## 判定方法について
 
