@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ja" data-register="blueprint">
+<head>
+<title>ドライブレター抽出: 既存方式から新方式へ</title>
+<link rel="stylesheet" href="kit.css" data-ve-kit>
+<style>
+.gate { fill: var(--surface); stroke: var(--border-bright); stroke-width: 1.5; }
+.gname { fill: var(--text); font-size: 14px; font-weight: 600; }
+.gcond { fill: var(--text-dim); font-size: 13px; font-family: var(--mono); }
+.lane { fill: var(--text); font-size: 15px; font-weight: 700; }
+.drv { fill: var(--text); font-size: 14px; }
+.drv-sub { fill: var(--text-dim); font-size: 12px; }
+.pass { fill: none; stroke: var(--text-dim); stroke-width: 1.75; }
+.stop { fill: none; stroke: var(--risk); stroke-width: 1.75; stroke-dasharray: 5 4; }
+.end-ok { fill: var(--ok); font-size: 14px; font-weight: 700; }
+.end-ng { fill: var(--risk); font-size: 13px; }
+.idbox { font-family: var(--mono); font-size: var(--t-small); overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-1); padding: var(--s-2) var(--s-3); line-height: 1.6; }
+.idbox mark { background: var(--accent-dim); color: var(--text); padding: 0 2px; border-radius: var(--r-1); }
+.idbox s { color: var(--risk); text-decoration: none; border-bottom: 2px dashed var(--risk); }
+.case p { margin: var(--s-2) 0 0; font-size: var(--t-small); color: var(--text-dim); }
+.steps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--s-4); }
+.chg { border-top: 2px solid var(--border-bright); padding-top: var(--s-3); }
+.chg h3 { margin: 0 0 var(--s-2); font-size: var(--t-body); }
+.chg code { overflow-wrap: anywhere; }
+.chg .fix { margin-top: var(--s-2); font-size: var(--t-small); color: var(--text-dim); }
+.ve-table td code { overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<nav class="ve-toc" aria-label="Sections"><div><a href="#legacy">既存方式</a><a href="#why">漏れる理由</a><a href="#new">新方式</a><a href="#migrate">移行</a><a href="#compare">比較</a><a href="#risk">未検証</a></div><span class="pos"></span></nav>
+<main>
+<header>
+  <p class="eyebrow">usbinfo · namespace drivesel</p>
+  <h1>新方式は親子関係で USB を判定する</h1>
+  <p class="lead">既存方式は <code>GetDriveType</code> と <code>USBSTOR#</code> の文字列で絞るため、USB 接続の SSD を取りこぼします。新方式はボリュームからディスク、USB デバイス本体へとたどるので、<b>接続方式によらず USB ストレージを拾います</b>。</p>
+  <p class="meta">usbinfo.cpp <code>SelectDrivesLegacy</code> / <code>SelectDrivesNew</code> · 実測は docs/findings.md (2026-11-21 追記) · Windows 11 ビルド 26300、PC 1 台</p>
+</header>
+
+<figure>
+  <div class="frame"><svg class="ve-svg" viewBox="0 0 960 420" aria-label="既存方式では E: の USB-SATA SSD が GetDriveType で落ち、新方式では D: と E: の両方が採用される">
+    <text class="lane" x="20" y="28">既存方式</text>
+    <text class="gname" x="300" y="56" text-anchor="middle">GetDriveType</text>
+    <text class="gcond" x="300" y="72" text-anchor="middle">= REMOVABLE</text>
+    <text class="gname" x="520" y="56" text-anchor="middle">ボリューム ID</text>
+    <text class="gcond" x="520" y="72" text-anchor="middle">USBSTOR# を含む</text>
+    <text class="gname" x="740" y="56" text-anchor="middle">GUID 照合</text>
+    <text class="gcond" x="740" y="72" text-anchor="middle">レターの表と一致</text>
+    <path class="pass" d="M200 100H860" marker-end="url(#ve-ah)"/>
+    <path class="stop" d="M200 130H292"/>
+    <path class="stop" d="M200 160H292"/>
+    <rect class="gate" x="293" y="82" width="14" height="96" rx="3"/>
+    <rect class="gate" x="513" y="82" width="14" height="96" rx="3"/>
+    <rect class="gate" x="733" y="82" width="14" height="96" rx="3"/>
+    <text class="ve-x" x="284" y="135">✕</text>
+    <text class="ve-x" x="284" y="165">✕</text>
+    <text class="drv" x="20" y="104">D: USB メモリ</text>
+    <text class="drv" x="20" y="134">E: USB-SATA SSD</text>
+    <text class="drv" x="20" y="164">C: 内蔵 NVMe</text>
+    <text class="end-ok" x="870" y="104">採用</text>
+    <text class="end-ng" x="318" y="134">FIXED で落ちる</text>
+    <text class="end-ng" x="318" y="164">FIXED で落ちる</text>
+
+    <path d="M20 200H940" stroke="var(--border)" stroke-width="1"/>
+
+    <text class="lane" x="20" y="238">新方式</text>
+    <text class="gname" x="290" y="266" text-anchor="middle">STORAGE\Volume\</text>
+    <text class="gcond" x="290" y="282" text-anchor="middle">ディスク上のボリューム</text>
+    <text class="gname" x="440" y="266" text-anchor="middle">ディスク番号</text>
+    <text class="gcond" x="440" y="282" text-anchor="middle">IOCTL で対応</text>
+    <text class="gname" x="590" y="266" text-anchor="middle">親をたどる</text>
+    <text class="gcond" x="590" y="282" text-anchor="middle">USB ハブの子</text>
+    <text class="gname" x="740" y="266" text-anchor="middle">取り外しポリシー</text>
+    <text class="gcond" x="740" y="282" text-anchor="middle">NoRemoval 以外</text>
+    <path class="pass" d="M200 310H860" marker-end="url(#ve-ah)"/>
+    <path class="ve-e is-hot" d="M200 340H860"/>
+    <path class="stop" d="M200 370H582"/>
+    <rect class="gate" x="283" y="292" width="14" height="96" rx="3"/>
+    <rect class="gate" x="433" y="292" width="14" height="96" rx="3"/>
+    <rect class="gate" x="583" y="292" width="14" height="96" rx="3"/>
+    <rect class="gate" x="733" y="292" width="14" height="96" rx="3"/>
+    <text class="ve-x" x="574" y="375">✕</text>
+    <text class="drv" x="20" y="314">D: USB メモリ</text>
+    <text class="drv" x="20" y="344">E: USB-SATA SSD</text>
+    <text class="drv" x="20" y="374">C: 内蔵 NVMe</text>
+    <text class="end-ok" x="870" y="314">採用</text>
+    <text class="end-ok" x="870" y="344">採用</text>
+    <text class="end-ng" x="608" y="374">USB に届かない</text>
+  </svg></div>
+  <figcaption><span class="fig-n">Fig. 1</span>実測した 3 台のうち、既存方式は D: だけを採用し、新方式は USB 接続の D: と E: を採用する。</figcaption>
+</figure>
+
+<div class="kpis">
+  <div class="kpi"><span class="ve-label">USB ストレージ (実測 2 台) のうち採用</span>
+    <ve-bars unit="台" max="2" label="既存方式は 2 台中 1 台、新方式は 2 台とも採用した"><ve-bar value="1">既存方式</ve-bar><ve-bar value="2" hot>新方式</ve-bar></ve-bars>
+  </div>
+  <div class="kpi"><span class="ve-label">呼び出し側の変更</span><span class="val">関数名だけ</span><small>戻り値は同じ <code>std::vector&lt;DriveEntry&gt;</code></small></div>
+  <div class="kpi"><span class="ve-label">管理者権限</span><span class="val">不要</span><small>新方式もアクセス権 0 で <code>CreateFileW</code></small></div>
+</div>
+
+<section id="legacy">
+  <div class="sec-head"><p class="ve-label caps">既存方式</p><h2>既存方式は「ドライブ種別」と「ID の文字列」の 2 つで絞る</h2></div>
+  <figure class="ve-steps">
+    <ve-flow label="既存方式は REMOVABLE のドライブの GUID と、ID に USBSTOR# を含むボリュームの GUID を照合する">
+      <ve-node id="az" at="1 1" sub="26 文字を順に" data-s="1">A:〜Z:</ve-node>
+      <ve-node id="dt" at="2 1" sub="REMOVABLE だけ" data-s="1">GetDriveType</ve-node>
+      <ve-node id="tbl" at="3 1" shape="db" sub="レター → GUID" data-s="1">GUID の表</ve-node>
+      <ve-node id="ven" at="1 2" sub="VOLUME を列挙" data-s="2">ボリューム</ve-node>
+      <ve-node id="idc" at="2 2" sub="USBSTOR# を含む" data-s="2">自分の ID</ve-node>
+      <ve-node id="par" at="1 3" sub="USBSTOR\ を含む" gone data-s="3">親の ID</ve-node>
+      <ve-node id="mt" at="3 2" key sub="一致したら採用" data-s="4">GUID 照合</ve-node>
+      <ve-edge from="az" to="dt" label="種別を聞く" data-s="1"/>
+      <ve-edge from="dt" to="tbl" label="GUID を控える" data-s="1"/>
+      <ve-edge from="ven" to="idc" label="ID を読む" data-s="2"/>
+      <ve-edge from="ven" to="par" label="親を読む" gone data-s="3"/>
+      <ve-edge from="idc" to="mt" label="当たれば" hot data-s="4"/>
+      <ve-edge from="tbl" to="mt" label="照合" data-s="4"/>
+    </ve-flow>
+    <div class="ve-player">
+      <ol class="ve-cap">
+        <li data-n="1/4">A:〜Z: のうち <code>DRIVE_REMOVABLE</code> のドライブだけ、ボリューム GUID を表に控える。</li>
+        <li data-n="2/4"><code>GUID_DEVINTERFACE_VOLUME</code> を列挙し、devnode の ID が <code>USBSTOR#</code> を含むかを見る。</li>
+        <li data-n="3/4">親の ID が <code>USBSTOR\</code> を含むかも見るが、実測では親が 3 台とも <code>ROOT\VOLMGR\0000</code> で、一度も当たらなかった。</li>
+        <li data-n="4/4">USB と判定したボリュームの GUID が表にあれば採用する。両方を通るのは USB メモリのような REMOVABLE の機器だけになる。</li>
+      </ol>
+      <button data-go="-1" aria-label="前へ">‹</button><button data-play aria-label="再生">▶</button><input type="range" aria-label="ステップ"><button data-go="1" aria-label="次へ">›</button>
+    </div>
+    <figcaption><span class="fig-n">Fig. 2</span>既存方式は 2 つの文字列条件の AND で、どちらもデバイスの接続先を見ていない。</figcaption>
+  </figure>
+</section>
+
+<section id="why">
+  <div class="sec-head"><p class="ve-label caps">漏れる理由</p><h2>USB-SATA SSD のボリューム ID には USBSTOR# が入らない</h2></div>
+  <p>ボリュームの ID の形は、ディスクがリムーバブルメディア扱いか固定ディスク扱いかで変わります。<code>USBSTOR#</code> が入るのは前者だけです。</p>
+  <figure>
+    <div class="cases">
+      <div class="case" data-st="ok">
+        <span class="chip ok">一致する</span>
+        <h3>D: USB メモリ (BOT)</h3>
+        <div class="idbox">STORAGE\VOLUME\_??_<mark>USBSTOR#</mark>DISK&amp;VEN__USB&amp;PROD__SANDISK_3.2GEN1&amp;…#{53F56307-…}</div>
+        <p>GetDriveType: REMOVABLE</p>
+      </div>
+      <div class="case" data-st="risk">
+        <span class="chip risk">一致しない</span>
+        <h3>E: USB-SATA SSD (BOT)</h3>
+        <div class="idbox">STORAGE\Volume\<s>{GUID}#0000000000100000</s></div>
+        <p>GetDriveType: FIXED。ディスクの ID は USBSTOR\DISK&amp;… なのに、ボリュームには出てこない。</p>
+      </div>
+      <div class="case" data-st="risk">
+        <span class="chip risk">一致しない</span>
+        <h3>UAS 接続の USB SSD</h3>
+        <div class="idbox">ディスク: <s>SCSI\Disk&amp;…</s><br>ボリューム: STORAGE\Volume\<s>{GUID}#…</s></div>
+        <p>ディスクの ID が内蔵 NVMe (SCSI\Disk&amp;Ven_NVMe&amp;…) と同じ形。</p>
+      </div>
+    </div>
+    <figcaption><span class="fig-n">Fig. 3</span><code>USBSTOR#</code> は接続方式ではなくメディアの扱いで決まるので、USB 判定の手がかりにならない。</figcaption>
+  </figure>
+</section>
+
+<section id="new">
+  <div class="sec-head"><p class="ve-label caps">新方式</p><h2>新方式はディスク番号でボリュームをディスクに対応付け、ディスクの親から USB デバイス本体に届く</h2></div>
+  <figure class="ve-steps">
+    <div class="frame"><svg class="ve-svg" viewBox="0 0 980 400" aria-label="ボリュームの親は volmgr で行き止まり。ディスク番号でディスクに移ると、親をたどって USB デバイス本体とハブに届く">
+      <path class="ve-e is-gone" data-s="1" d="M170 116V250"/>
+      <text class="ve-el r" data-s="1" x="180" y="190">親</text>
+      <text class="ve-x" data-s="1" x="164" y="200">✕</text>
+      <path class="ve-e is-hot" data-s="2" d="M290 80H530"/>
+      <text class="ve-el" data-s="2" x="410" y="71" text-anchor="middle">IOCTL_STORAGE_GET_DEVICE_NUMBER</text>
+      <path class="ve-e" data-s="3" d="M650 116V174"/>
+      <text class="ve-el r" data-s="3" x="660" y="150">親</text>
+      <path class="ve-e" data-s="3" d="M650 236V294"/>
+      <text class="ve-el r" data-s="3" x="660" y="270">親</text>
+      <g class="ve-n" data-s="1"><rect class="sh" x="50" y="44" width="240" height="72" rx="6"/><text class="ve-kind" x="170" y="62">ボリューム</text><text x="170" y="84">STORAGE\Volume\…</text><text class="sub" x="170" y="102">E: のボリューム</text></g>
+      <g class="ve-n" data-s="1"><rect class="sh" x="50" y="250" width="240" height="60" rx="6"/><text x="170" y="274">ROOT\VOLMGR\0000</text><text class="sub" x="170" y="294">USB に届かない</text></g>
+      <g class="ve-n" data-s="2"><rect class="sh" x="530" y="44" width="240" height="72" rx="6"/><text class="ve-kind" x="650" y="62">ディスク</text><text x="650" y="84">USBSTOR\DISK&amp;…</text><text class="sub" x="650" y="102">番号で表から引く</text></g>
+      <g class="ve-n is-key" data-s="3"><rect class="sh" x="530" y="174" width="240" height="62" rx="6"/><text x="650" y="198">USB\VID_152D&amp;PID_2329</text><text class="sub" x="650" y="218">USB デバイス本体</text></g>
+      <g class="ve-n" data-s="3"><rect class="sh" x="530" y="294" width="240" height="62" rx="6"/><text x="650" y="318">USB ハブ</text><text class="sub" x="650" y="338">USB_HUB インターフェイス</text></g>
+      <path class="ann" data-s="4" d="M770 80H806"/>
+      <g class="ve-co" data-s="4" transform="translate(818 80)"><circle r="11"/><text>4</text></g>
+      <text class="ve-tag key" data-s="4" x="800" y="112">RemovalPolicy</text>
+      <text class="ve-tag" data-s="4" x="800" y="130">SurpriseRemoval</text>
+      <path class="ann" data-s="5" d="M770 205H806"/>
+      <g class="ve-co" data-s="5" transform="translate(818 205)"><circle r="11"/><text>5</text></g>
+      <text class="ve-tag" data-s="5" x="800" y="237">CAP_REMOVABLE</text>
+      <text class="ve-tag" data-s="5" x="800" y="255">任意の条件</text>
+    </svg></div>
+    <div class="ve-player">
+      <ol class="ve-cap">
+        <li data-n="1/5">E: のボリュームの親は <code>ROOT\VOLMGR\0000</code> で、ボリュームから親をたどっても USB に届かない。</li>
+        <li data-n="2/5">ボリュームを開いて <code>IOCTL_STORAGE_GET_DEVICE_NUMBER</code> を発行し、先に作った「ディスク番号 → ディスクの devnode」の表から、ディスクを引く。</li>
+        <li data-n="3/5">ディスクから親をたどり、親が USB ハブであるノードを USB デバイス本体とする。BOT でも UAS でも同じ道筋になる。</li>
+        <li data-n="4/5">ディスクの devnode の取り外しポリシーが <code>ExpectNoRemoval</code> なら外す。取得できないときも外す。</li>
+        <li data-n="5/5"><code>excludeInternalUsb</code> が true のときだけ、USB デバイス本体の <code>CM_DEVCAP_REMOVABLE</code> も確かめる。</li>
+      </ol>
+      <button data-go="-1" aria-label="前へ">‹</button><button data-play aria-label="再生">▶</button><input type="range" aria-label="ステップ"><button data-go="1" aria-label="次へ">›</button>
+    </div>
+    <figcaption><span class="fig-n">Fig. 4</span>ボリュームから直接は USB に届かないが、ディスク番号でディスクに移れば親子関係で届く (E: の実測)。</figcaption>
+  </figure>
+
+  <p>新方式は条件ごとに理由を記録し、<code>-f letters</code> の <code>New: result</code> 列に出します。どの条件で外れたかが 1 行で分かります。</p>
+  <figure>
+    <div class="ve-table"><table>
+      <thead><tr><th>順</th><th>条件</th><th><code>New: result</code> の値</th><th>外れる例</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td>ドライブレターがある</td><td><code>no drive letter</code></td><td>レターのないボリューム</td></tr>
+        <tr><td class="num">2</td><td>ID が <code>STORAGE\Volume\</code> で始まる</td><td><code>not a disk volume (optical/floppy)</code></td><td>光学ドライブ、フロッピー</td></tr>
+        <tr><td class="num">3</td><td>ディスク番号が取れる</td><td><code>IOCTL_STORAGE_GET_DEVICE_NUMBER failed (spanned volume?)</code></td><td>複数ディスクにまたがるボリューム</td></tr>
+        <tr><td class="num">4</td><td><code>DeviceType</code> が <code>FILE_DEVICE_DISK</code></td><td><code>not FILE_DEVICE_DISK</code></td><td>ディスク以外</td></tr>
+        <tr><td class="num">5</td><td>同じ番号のディスクがある</td><td><code>disk not found</code></td><td>ディスクのインターフェイスが未登録</td></tr>
+        <tr><td class="num">6</td><td>親に USB デバイス本体がある</td><td><code>not USB</code></td><td>C: 内蔵 NVMe (実測)</td></tr>
+        <tr><td class="num">7</td><td>取り外しポリシーが <code>ExpectNoRemoval</code> 以外</td><td><code>removal policy is ExpectNoRemoval</code></td><td>内蔵扱いのディスク</td></tr>
+        <tr><td class="num">8</td><td>(任意) <code>CM_DEVCAP_REMOVABLE</code> が立つ</td><td><code>internal USB device (CM_DEVCAP_REMOVABLE off)</code></td><td>内蔵の USB 機器</td></tr>
+        <tr><td class="num">—</td><td>すべて満たす</td><td><code>selected</code></td><td>D:、E: (実測)</td></tr>
+      </tbody>
+    </table></div>
+    <figcaption><span class="fig-n">Fig. 5</span>新方式は 8 つの条件を順に確かめ、最初に外れた条件をそのまま理由として返す。</figcaption>
+  </figure>
+</section>
+
+<section id="migrate">
+  <div class="sec-head"><p class="ve-label caps">移行</p><h2>既存方式から新方式へは 5 つの変更で移る</h2></div>
+  <figure>
+    <div class="steps-grid">
+      <div class="chg"><span class="chip warn">削る</span><h3>1. GetDriveType で絞らない</h3><p>全レターのボリューム GUID を控える。</p><p class="fix">拾えるもの: USB HDD/SSD (FIXED)</p></div>
+      <div class="chg"><span class="chip ok">足す</span><h3>2. STORAGE\Volume\ で始まるものに限る</h3><p>1. で外れた光学ドライブとフロッピーを、ここで外す。</p><p class="fix">フロッピーは番号がハードディスクと重なるので、番号で探す前に外す</p></div>
+      <div class="chg"><span class="chip warn">置き換える</span><h3>3. ID の文字列照合をディスク番号の対応付けにする</h3><p><code>USBSTOR#</code> と <code>USBSTOR\</code> の照合を削り、IOCTL の番号でディスクを引く。</p><p class="fix">拾えるもの: UAS 機器、<code>{GUID}#…</code> 形のボリューム</p></div>
+      <div class="chg"><span class="chip ok">足す</span><h3>4. ディスクの親をたどって USB を判定する</h3><p>親が USB ハブのノードがあれば USB とする。</p><p class="fix">BOT、UAS、ハブ経由のどれでも本体に届いた (実測)</p></div>
+      <div class="chg"><span class="chip ok">足す</span><h3>5. 取り外しポリシーで内蔵扱いを外す</h3><p><code>ExpectNoRemoval</code> を外す。必要なら <code>excludeInternalUsb</code> も使う。</p><p class="fix">内蔵 NVMe は ExpectNoRemoval、USB 機器はすべて ExpectSurpriseRemoval だった</p></div>
+    </div>
+    <figcaption><span class="fig-n">Fig. 6</span>GetDriveType と ID 文字列の照合を削り、ディスク番号、親子関係、取り外しポリシーの確認を足すと新方式になる。</figcaption>
+  </figure>
+
+  <p>呼び出し側の差し替えは次の順に進めます。</p>
+  <ol>
+    <li>対象の PC で <code>usbinfo -f letters</code> を実行し、両方式の結果を並べる。</li>
+    <li><code>Diff</code> 列で <code>LEGACY ONLY</code> と <code>NEW ONLY</code> の行を確かめる。<code>New: result</code> 列が外れた理由を示す。</li>
+    <li>呼び出し側の <code>SelectDrivesLegacy()</code> を <code>SelectDrivesNew()</code> に置き換える。戻り値の型は同じ。</li>
+    <li><code>namespace drivesel</code> を移植するときは、<code>setupapi.lib</code> と <code>cfgmgr32.lib</code> をリンクする。</li>
+    <li>ノート PC の内蔵カードリーダーを外したいときは <code>SelectDrivesNew(true)</code> にする。</li>
+  </ol>
+  <p>新方式では GUID の照合も <code>_wcsicmp</code> にして、大文字小文字を区別しなくなりました。<code>CM_Get_Device_ID</code> は大文字の ID を返し、<code>DEVPKEY_Device_InstanceId</code> は元の大文字小文字のまま返すためです。</p>
+</section>
+
+<section id="compare">
+  <div class="sec-head"><p class="ve-label caps">比較</p><h2>新方式は USB 接続の固定ディスクを拾い、USB 以外は両方式とも外す</h2></div>
+  <figure>
+    <div class="ve-table"><table>
+      <thead><tr><th>ケース</th><th>既存方式</th><th>新方式</th><th>根拠</th></tr></thead>
+      <tbody>
+        <tr><td>USB メモリ (BOT、REMOVABLE)</td><td><span class="chip ok">抽出</span></td><td><span class="chip ok">抽出</span></td><td>実測 D:</td></tr>
+        <tr><td>USB-SATA 変換の SSD (BOT、FIXED)</td><td><span class="chip risk">漏れる</span></td><td><span class="chip ok">抽出</span></td><td>実測 E:</td></tr>
+        <tr><td>UAS 接続の USB SSD (<code>SCSI\Disk&amp;…</code>)</td><td><span class="chip risk">漏れる</span></td><td><span class="chip ok">抽出</span></td><td>README の比較表。実測 2 台はレターがなく <code>-f letters</code> に出ない</td></tr>
+        <tr><td>内蔵 NVMe</td><td><span class="chip ok">対象外</span></td><td><span class="chip ok">対象外</span></td><td>実測 C:。新方式は <code>not USB</code></td></tr>
+        <tr><td>USB 光学ドライブ</td><td><span class="chip ok">対象外</span></td><td><span class="chip ok">対象外</span></td><td>コード。既存は CDROM で、新は条件 2 で外れる</td></tr>
+        <tr><td>ノート PC の内蔵 USB カードリーダー</td><td><span class="chip warn">抽出</span></td><td><span class="chip warn">ポリシー次第</span></td><td>README の比較表。<code>excludeInternalUsb</code> で外せる。未検証</td></tr>
+      </tbody>
+    </table></div>
+    <figcaption><span class="fig-n">Fig. 7</span>USB 接続で REMOVABLE でないディスクは、新方式だけが拾う。</figcaption>
+  </figure>
+
+  <figure>
+    <div class="ve-table"><table>
+      <thead><tr><th>観点</th><th>既存方式</th><th>新方式</th></tr></thead>
+      <tbody>
+        <tr><td>USB の判定に使うもの</td><td>ボリューム ID と親 ID の文字列</td><td>ディスクの devnode の親子関係</td></tr>
+        <tr><td>列挙するインターフェイス</td><td><code>VOLUME</code></td><td><code>DISK</code> と <code>VOLUME</code></td></tr>
+        <tr><td>開くデバイス</td><td>なし</td><td>各ディスクと、レターのある各ボリューム (アクセス権 0)</td></tr>
+        <tr><td>当たらない分岐</td><td>親 ID の <code>USBSTOR\</code> 照合</td><td>なし</td></tr>
+        <tr><td>除外の理由</td><td>返さない</td><td>8 種の文字列で返す</td></tr>
+        <tr><td>GUID の比較</td><td><code>==</code> (大文字小文字を区別)</td><td><code>_wcsicmp</code></td></tr>
+      </tbody>
+    </table></div>
+    <figcaption><span class="fig-n">Fig. 8</span>新方式はデバイスを開く処理が増える代わりに、除外した理由を返す。</figcaption>
+  </figure>
+</section>
+
+<section id="risk">
+  <div class="sec-head"><p class="ve-label caps">未検証</p><h2>採用の前に、カードリーダーと Windows 10 で確かめる</h2></div>
+  <div class="cases">
+    <div class="case" data-st="warn"><span class="chip warn">未検証</span><h3>Windows 10</h3><p>調査は Windows 11 のみ。</p></div>
+    <div class="case" data-st="warn"><span class="chip warn">未検証</span><h3>カードリーダー</h3><p>メディアあり / なし、複数スロット、内蔵品。取り外しポリシーで外れるかが要点。</p></div>
+    <div class="case" data-st="warn"><span class="chip warn">未検証</span><h3>UAS の USB メモリ</h3><p>USB メモリは BOT の 1 本だけ確認した。</p></div>
+    <div class="case" data-st="warn"><span class="chip warn">未検証</span><h3>複数の PC</h3><p>内蔵か外付けかは ACPI の記述に依存する。</p></div>
+  </div>
+</section>
+
+<section class="sources" aria-label="Sources"><p class="ve-label caps">Sources</p>
+  <p><code>usbinfo.cpp:1673-1736</code> SelectDrivesLegacy · <code>usbinfo.cpp:1736-1889</code> SelectDrivesNew · <code>usbinfo.cpp:1891</code> compareDriveSelection</p>
+  <p><code>README.md</code> 「ドライブレターの抽出」「判定方法について」 · <code>docs/findings.md</code> 「既存方式と新方式の比較 (2026-11-21 追記)」「未検証の範囲」</p>
+</section>
+</main>
+</body>
+</html>
