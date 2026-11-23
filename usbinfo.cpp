@@ -1365,6 +1365,7 @@ struct Options {
     bool wmi = true;
     bool allProps = true;
     bool excludeInternalUsb = false;
+    bool vidPid = false;
 };
 
 struct WmiData {
@@ -2119,6 +2120,198 @@ static std::wstring lsusb(bool tree)
     return o;
 }
 
+// ---------------------------------------------------------------------------
+// 目コピ用の短いコード (-f code) とその検証 (--decode)
+//
+//   UI1 N03 A3                         ヘッダー: 形式バージョン、ドライブ行の数、チェック値
+//   E: FNY S GU NN SYN 2E              ドライブ行
+//   |  ||| | || || ||| +- CRC-8 (空白と : を除いた文字列に対する 16 進 2 桁)
+//   |  ||| | || || ||+--- USB デバイスが PC 本体のコンテナー内か (Y/N/-)
+//   |  ||| | || || |+---- USB デバイスの CM_DEVCAP_REMOVABLE (Y/N/-)
+//   |  ||| | || || +----- ディスクの取り外しポリシー (N=NoRemoval O=Orderly S=Surprise -)
+//   |  ||| | || |+------- 既存方式: 親の ID が USBSTOR\ を含む (Y/N/-)
+//   |  ||| | || +-------- 既存方式: ID が USBSTOR# を含む (Y/N/-)
+//   |  ||| | |+---------- ディスク ID の種類 (U=USBSTOR S=SCSI O=その他 -)
+//   |  ||| | +----------- ボリューム ID の種類 (codeVolumeForm を参照)
+//   |  ||| +------------- 新方式の結果の理由 (codeReason を参照)
+//   |  ||+--------------- 新方式で抽出 (Y/N)
+//   |  |+---------------- 既存方式で抽出 (Y/N)
+//   |  +----------------- GetDriveType (R/F/C/W/M/U)
+//   +-------------------- ドライブレター
+//
+// シリアル番号、PC 名、ボリューム GUID は含めない。VID:PID は --vidpid のときだけ付ける。
+// ---------------------------------------------------------------------------
+
+static BYTE crc8(const std::string& s)
+{
+    BYTE c = 0;
+    for (unsigned char ch : s) {
+        c ^= ch;
+        for (int i = 0; i < 8; ++i) c = (BYTE)((c & 0x80) ? (c << 1) ^ 0x07 : c << 1);
+    }
+    return c;
+}
+
+// 大文字にして、英数字と - だけを残す (空白や : の打ち方の違いを無視する)
+static std::string codeNormalize(const std::string& s)
+{
+    std::string o;
+    for (unsigned char c : s)
+        if (isalnum(c) || c == '-') o += (char)toupper(c);
+    return o;
+}
+
+static wchar_t codeBool(const Node* parent, const wchar_t* key)
+{
+    const Node* n = parent ? parent->find(key) : nullptr;
+    if (!n) return L'-';
+    return n->val == L"true" ? L'Y' : n->val == L"false" ? L'N' : L'-';
+}
+
+static wchar_t codeReason(const std::wstring& r)
+{
+    if (r == L"selected") return L'S';
+    if (r == L"not USB") return L'U';
+    if (startsWithI(r, L"not a disk volume")) return L'V';
+    if (startsWithI(r, L"IOCTL_STORAGE_GET_DEVICE_NUMBER")) return L'E';
+    if (r == L"not FILE_DEVICE_DISK") return L'K';
+    if (r == L"disk not found") return L'M';
+    if (startsWithI(r, L"removal policy")) return L'P';
+    if (startsWithI(r, L"internal USB")) return L'I';
+    return L'X';
+}
+
+static wchar_t codeVolumeForm(std::wstring id)
+{
+    for (wchar_t& c : id) c = (wchar_t)towupper(c);
+    if (id.rfind(L"STORAGE\\VOLUME\\_??_USBSTOR#", 0) == 0) return L'U';
+    if (id.rfind(L"STORAGE\\VOLUME\\_??_SCSI#", 0) == 0) return L'S';
+    if (id.rfind(L"STORAGE\\VOLUME\\_??_", 0) == 0) return L'T';
+    if (id.rfind(L"STORAGE\\VOLUME\\{", 0) == 0) return L'G';
+    if (id.rfind(L"STORAGE\\VOLUME\\", 0) == 0 || id.empty() || id[0] == L'(') return L'X';
+    return L'D';   // ドライブ自身の devnode (光学ドライブ、フロッピー)
+}
+
+static std::wstring codeReport(const Node& arr, bool withVidPid)
+{
+    auto seal = [](const std::wstring& body) {
+        std::string a;
+        for (wchar_t c : body) a += (char)c;
+        return body + fmt(L" %02X\n", crc8(codeNormalize(a)));
+    };
+    std::wstring o = seal(fmt(L"UI1 N%02zu", arr.kids.size()));
+    for (const Node& r : arr.kids) {
+        const Node* d = r.find(L"newDetail");
+        const Node* l = r.find(L"legacyDetail");
+        auto val = [](const Node* p, const wchar_t* k) { const Node* n = p ? p->find(k) : nullptr; return n ? n->val : std::wstring(); };
+
+        std::wstring dt = val(&r, L"driveType");
+        wchar_t type = dt == L"REMOVABLE" ? L'R' : dt == L"FIXED" ? L'F' : dt == L"CDROM" ? L'C' : dt == L"REMOTE" ? L'W' : dt == L"RAMDISK" ? L'M' : L'U';
+        std::wstring diskId = val(d, L"diskInstanceId");
+        wchar_t disk = diskId.empty() ? L'-' : startsWithI(diskId, L"USBSTOR\\") ? L'U' : startsWithI(diskId, L"SCSI\\") ? L'S' : L'O';
+        std::wstring pol = val(d, L"diskRemovalPolicy");
+        wchar_t policy = pol == L"ExpectNoRemoval" ? L'N' : pol == L"ExpectOrderlyRemoval" ? L'O' : pol == L"ExpectSurpriseRemoval" ? L'S' : L'-';
+
+        std::wstring line = fmt(L"%c: %c%c%c %c %c%c %c%c %c%c%c", val(&r, L"drive")[0], type,
+                                val(&r, L"legacy") == L"selected" ? L'Y' : L'N', val(&r, L"new") == L"selected" ? L'Y' : L'N',
+                                codeReason(val(d, L"result")), codeVolumeForm(val(&r, L"volumeInstanceId")), disk,
+                                codeBool(l, L"idHasUsbstorHash"), codeBool(l, L"parentHasUsbstor"),
+                                policy, codeBool(d, L"usbCapRemovable"), codeBool(d, L"usbInLocalMachineContainer"));
+        if (withVidPid) {
+            USHORT vid = 0, pid = 0;
+            std::wstring usb = val(d, L"usbDeviceInstanceId");
+            if (parseIdAfter(usb, L"VID", vid) && parseIdAfter(usb, L"PID", pid)) line += fmt(L" %04X:%04X", vid, pid);
+            else line += L" ----:----";
+        }
+        o += seal(line);
+    }
+    return o;
+}
+
+static const char* codeName(char c, const char* table)
+{
+    // table は "X=name|Y=name|..." の形
+    for (const char* p = table; *p;) {
+        const char* end = strchr(p, '|');
+        size_t n = end ? (size_t)(end - p) : strlen(p);
+        if (*p == c) { static std::string s; s.assign(p + 2, n - 2); return s.c_str(); }
+        p += n + (end ? 1 : 0);
+    }
+    return nullptr;
+}
+
+// 手で打ち直したコードを検証して展開する。すべて正しければ 0、誤りがあれば 1 を返す
+static int decodeCodes(const wchar_t* file)
+{
+    FILE* fp = stdin;
+    if (file && _wfopen_s(&fp, file, L"rb") != 0) { fwprintf(stderr, L"cannot open %s\n", file); return 2; }
+    std::string text;
+    char buf[4096];
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), fp)) > 0) text.append(buf, got);
+    if (file) fclose(fp);
+
+    static const char* const kType = "R=REMOVABLE|F=FIXED|C=CDROM|W=REMOTE|M=RAMDISK|U=UNKNOWN";
+    static const char* const kYN = "Y=yes|N=no";
+    static const char* const kTri = "Y=yes|N=no|-=n/a";
+    static const char* const kReason = "S=selected|U=not USB|V=not a disk volume|E=device number failed|K=not FILE_DEVICE_DISK|M=disk not found|P=ExpectNoRemoval|I=internal USB|X=other";
+    static const char* const kVol = "U=_??_USBSTOR#|S=_??_SCSI#|T=_??_other|G={GUID}#offset|D=drive itself|X=unknown";
+    static const char* const kDisk = "U=USBSTOR|S=SCSI|O=other|-=none";
+    static const char* const kPol = "N=ExpectNoRemoval|O=ExpectOrderlyRemoval|S=ExpectSurpriseRemoval|-=n/a";
+
+    std::string o;
+    int lineNo = 0, bad = 0, drives = 0, expected = -1;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t nl = text.find('\n', pos);
+        std::string raw = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        pos = nl == std::string::npos ? text.size() + 1 : nl + 1;
+        ++lineNo;
+        size_t first = raw.find_first_not_of(" \t\r\xEF\xBB\xBF");
+        if (first == std::string::npos || raw[first] == '#') continue;
+        std::string n = codeNormalize(raw);
+        auto fail = [&](const char* why) {
+            o += "NG line " + std::to_string(lineNo) + ": " + why + ": " + n + "\n";   // 長い行でも切り詰めない
+            ++bad;
+        };
+        if (n.size() < 3) { fail("too short"); continue; }
+        std::string body = n.substr(0, n.size() - 2);
+        unsigned given = 0;
+        bool hexOk = isxdigit((unsigned char)n[n.size() - 2]) && isxdigit((unsigned char)n[n.size() - 1]);
+        if (!hexOk || sscanf_s(n.c_str() + n.size() - 2, "%2x", &given) != 1 || crc8(body) != given) { fail("checksum mismatch, reread this line"); continue; }
+
+        if (body.rfind("UI1N", 0) == 0 && body.size() == 6 && isdigit((unsigned char)body[4]) && isdigit((unsigned char)body[5])) {
+            expected = atoi(body.c_str() + 4);
+            continue;
+        }
+        if (body.size() != 12 && body.size() != 20) { fail("wrong length"); continue; }
+        const char* tables[] = { kType, kYN, kYN, kReason, kVol, kDisk, kTri, kTri, kPol, kTri, kTri };
+        const char* names[11] = {};
+        bool ok = body[0] >= 'A' && body[0] <= 'Z';
+        for (int i = 0; ok && i < 11; ++i) {
+            const char* name = codeName(body[i + 1], tables[i]);
+            if (!name) { ok = false; break; }
+            static std::string keep[11];
+            keep[i] = name;
+            names[i] = keep[i].c_str();
+        }
+        if (!ok) { fail("unknown field value"); continue; }
+        ++drives;
+        char m[640];
+        const char* diff = body[2] == body[3] ? "same" : body[2] == 'Y' ? "LEGACY ONLY" : "NEW ONLY";
+        sprintf_s(m, "OK %c: %s legacy=%s new=%s diff=%s reason=%s volumeId=%s diskId=%s legacyIdHit=%s legacyParentHit=%s policy=%s capRemovable=%s inLocalMachine=%s",
+                  body[0], names[0], names[1], names[2], diff, names[3], names[4], names[5], names[6], names[7], names[8], names[9], names[10]);
+        o += m;
+        if (body.size() == 20) o += " vidpid=" + body.substr(12, 4) + ":" + body.substr(16, 4);
+        o += "\n";
+    }
+    if (expected < 0) { o += "NG header line (UI1 Nnn) is missing\n"; ++bad; }
+    else if (expected != drives) { char m[96]; sprintf_s(m, "NG drive lines: header says %d, valid lines %d\n", expected, drives); o += m; ++bad; }
+    o += bad ? "RESULT: NG, reread the lines above\n" : "RESULT: OK\n";
+    fputs(o.c_str(), stdout);
+    return bad ? 1 : 0;
+}
+
 static int writeOutput(const std::wstring& out, const std::wstring& outFile, bool bom)
 {
     std::string utf8 = toUtf8(out);
@@ -2153,10 +2346,13 @@ static void usage()
         L"                                 lsusb         one line per USB device, like lsusb\n"
         L"                                 lsusb-tree    USB topology tree, like lsusb -tv\n"
         L"                                 letters       drive letters selected by the legacy and new logic\n"
+        L"                                 code          short checksummed lines for manual transcription\n"
         L"  -o, --out FILE               write UTF-8 output to FILE instead of stdout\n"
         L"      --no-wmi                 skip WMI queries\n"
         L"      --no-props               skip the full devnode property dump\n"
         L"      --exclude-internal-usb   new logic: also drop USB devices without CM_DEVCAP_REMOVABLE\n"
+        L"      --vidpid                 -f code: append VID:PID to each line\n"
+        L"      --decode [FILE]          verify and expand typed -f code lines from FILE or stdin\n"
         L"  -h, --help                   show this help\n",
         stderr);
 }
@@ -2173,19 +2369,21 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--no-wmi") opt.wmi = false;
         else if (a == L"--no-props") opt.allProps = false;
         else if (a == L"--exclude-internal-usb") opt.excludeInternalUsb = true;
+        else if (a == L"--vidpid") opt.vidPid = true;
+        else if (a == L"--decode") return decodeCodes(i + 1 < argc ? argv[i + 1] : nullptr);
         else { usage(); return (a == L"-h" || a == L"--help") ? 0 : 2; }
     }
     if (opt.format != L"text" && opt.format != L"json" && opt.format != L"csv" &&
-        opt.format != L"lsusb" && opt.format != L"lsusb-tree" && opt.format != L"letters") { usage(); return 2; }
+        opt.format != L"lsusb" && opt.format != L"lsusb-tree" && opt.format != L"letters" && opt.format != L"code") { usage(); return 2; }
 
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);   // メディアなしドライブのダイアログ抑止
 
     if (opt.format == L"lsusb" || opt.format == L"lsusb-tree")
         return writeOutput(lsusb(opt.format == L"lsusb-tree"), opt.outFile, false);
-    if (opt.format == L"letters") {
+    if (opt.format == L"letters" || opt.format == L"code") {
         Node arr;
         compareDriveSelection(arr, opt.excludeInternalUsb);
-        return writeOutput(lettersTable(arr), opt.outFile, false);
+        return writeOutput(opt.format == L"code" ? codeReport(arr, opt.vidPid) : lettersTable(arr), opt.outFile, false);
     }
 
     Node root;

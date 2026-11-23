@@ -32,6 +32,8 @@ usbinfo [options]
 | `--no-wmi` | WMI の問い合わせを省略する (実行が速くなる) |
 | `--no-props` | devnode の全プロパティダンプ (`allProperties`) を省略する |
 | `--exclude-internal-usb` | 新方式のドライブ抽出で、`CM_DEVCAP_REMOVABLE` が立っていない USB デバイス (内蔵扱い) も除外する |
+| `--vidpid` | `-f code` の各行に VID:PID を付ける |
+| `--decode [FILE]` | 手で打ち直した `-f code` の内容を FILE または標準入力から読み、写し間違いを検査して展開する |
 | `-h`, `--help` | ヘルプを表示する |
 
 | FORMAT | 内容 |
@@ -42,6 +44,7 @@ usbinfo [options]
 | `lsusb` | USB デバイスを 1 台 1 行で一覧する (Linux の `lsusb` 風) |
 | `lsusb-tree` | USB の接続ツリーを表示する (Linux の `lsusb -tv` 風) |
 | `letters` | ドライブレターごとに、既存方式と新方式で抽出されるかを並べる (「ドライブレターの抽出」を参照) |
+| `code` | 比較結果を、手で写しやすいチェック値付きの短いコードで出力する ([docs/manual-transcription.md](docs/manual-transcription.md) を参照) |
 
 例:
 
