@@ -12,9 +12,9 @@
    ```
 
    ```
-   UI1 N03 7A
+   UI1 N03 A3
    C: FNN U GS NN N-- 7D
-   D: RYY S UU YN SYN 41
+   D: RYY S UU YN SYN 04
    E: FNY S GU NN SYN 2E
    ```
 
