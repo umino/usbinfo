@@ -51,7 +51,7 @@ E: FNY S GU NN SYN 2E
 | 4 | `Y` | 新方式で抽出 | `Y` / `N` |
 | 5 | `S` | 新方式の結果の理由 | `S` 抽出、`U` USB でない、`V` ディスクのボリュームでない、`E` 番号取得の失敗、`K` ディスク種別でない、`M` ディスクなし、`P` ExpectNoRemoval、`I` 内蔵 USB、`X` その他 |
 | 6 | `G` | ボリューム ID の形 | `U` `_??_USBSTOR#`、`S` `_??_SCSI#`、`T` `_??_` その他、`G` `{GUID}#オフセット`、`D` ドライブ自身、`X` 不明 |
-| 7 | `U` | ディスク ID の種類 | `U` USBSTOR、`S` SCSI、`O` その他、`-` なし |
+| 7 | `U` | ディスクの列挙子 (`DEVPKEY_Device_EnumeratorName`) | `U` USBSTOR、`S` SCSI、`O` その他、`-` ディスクなし |
 | 8 | `N` | 既存方式: ID が `USBSTOR#` を含む | `Y` / `N` / `-` |
 | 9 | `N` | 既存方式: 親の ID が `USBSTOR\` を含む | `Y` / `N` / `-` |
 | 10 | `S` | 取り外しポリシー | `N` NoRemoval、`O` Orderly、`S` Surprise、`-` 不明 |

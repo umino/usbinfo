@@ -244,7 +244,7 @@ Linux の `lsusb` との違い:
 ### usb / usbStorageDriverService
 
 USB 経由のディスクにだけ出力されます。`usb` は対応する USB デバイスの要約で、項目の意味は次節と同じです。
-`usbStorageDriverService` はディスクに最も近い USB 列挙ノードのサービス名で、転送方式の判別に使えます。
+`usbStorageDriverService` はディスクに最も近い USB 列挙ノード (列挙子 `DEVPKEY_Device_EnumeratorName` が `USB` のノード) のサービス名で、転送方式の判別に使えます。
 
 ### wmi
 
@@ -358,16 +358,18 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 `STORAGE\Volume\...` の devnode の親をたどると、ボリュームマネージャー (`ROOT\volmgr\0000`) に行き着き、USB デバイスには届きません。
 そのため、このツールは次のようにボリュームとドライブを対応付けています。
 
-- **`STORAGE\Volume\...` のボリューム**: ボリュームを開いて `IOCTL_STORAGE_GET_DEVICE_NUMBER` でディスク番号を得て、`GUID_DEVINTERFACE_DISK` のディスクと番号で対応付ける。
-- **それ以外 (光学ドライブ、フロッピー)**: インターフェイスを持つ devnode がドライブ自身なので、インスタンス ID の一致で対応付ける。
+- **光学ドライブ、フロッピーのボリューム**: インターフェイスを持つ devnode が、それ自身で `GUID_DEVINTERFACE_CDROM` か `GUID_DEVINTERFACE_FLOPPY` も登録している (= ドライブ自身がボリュームを兼ねている)。インスタンス ID の一致でドライブと対応付ける。
+- **それ以外 (ディスク上のボリューム)**: ボリュームを開いて `IOCTL_STORAGE_GET_DEVICE_NUMBER` でディスク番号を得て、`GUID_DEVINTERFACE_DISK` のディスクと番号で対応付ける。
+
+どちらに当たるかは、ID の文字列 (`STORAGE\Volume\` で始まるか) ではなく、登録しているインターフェイスで判定しています。ID の形は Microsoft が公開している仕様ではないためです ([docs/instance-id.md](docs/instance-id.md) を参照)。
 
 フロッピーを番号で対応付けてはいけない理由は、フロッピーのボリュームに `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行すると、`DeviceType` が `FILE_DEVICE_DISK`、`DeviceNumber` がフロッピーの通し番号 (`\Device\Floppy0` なら 0) になるためです。
 この番号はハードディスクの番号 (`PhysicalDrive0`) と区別がつかず、種類と番号だけで探すと `PhysicalDrive0` のディスクに誤って対応付けられます。
 
-## ドライブレターの抽出 (既存方式と新方式の比較)
+## ドライブレターの抽出 (既存方式・新方式・タスクトレイ方式の比較)
 
-`usbinfo.cpp` の `namespace drivesel` に、「リムーバブルな USB ストレージのドライブレター」を抽出する関数を 2 つ用意しています。
-どちらも結果は `DriveEntry { int driveIndex; DEVINST devInst; }` のリストで、既存コードの出力 (ドライブレター index と devinst の組) と同じ形です。
+`usbinfo.cpp` の `namespace drivesel` に、「リムーバブルな USB ストレージのドライブレター」を抽出する関数を 3 つ用意しています。
+どれも結果は `DriveEntry { int driveIndex; DEVINST devInst; }` のリストで、既存コードの出力 (ドライブレター index と devinst の組) と同じ形です。
 `devInst` は `GUID_DEVINTERFACE_VOLUME` を SetupDi で列挙したときの `SP_DEVINFO_DATA.DevInst` です。
 この namespace は usbinfo の他の部分に依存しないので、そのまま移植できます (`setupapi.lib` と `cfgmgr32.lib` が必要)。
 
@@ -375,11 +377,12 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 |---|---|
 | `SelectDrivesLegacy()` | 既存方式の再現。`GetDriveType` が `DRIVE_REMOVABLE` のドライブのうち、ボリュームの devnode の ID が `USBSTOR#` を含むか、親の ID が `USBSTOR\` を含むもの |
 | `SelectDrivesNew(excludeInternalUsb)` | 新方式。下記の条件をすべて満たすもの |
+| `SelectDrivesSafeRemoval(includeNonUsb)` | タスクトレイ方式。「ハードウェアを安全に取り外してメディアを取り出す」に出るものと同じ基準 (`DEVPKEY_Device_SafeRemovalRequired`) で抽出する。新方式の 1.〜3. のあと、ディスク自身か祖先のどれかで `DEVPKEY_Device_SafeRemovalRequired` が TRUE のもの。`includeNonUsb` が false なら 4. (USB 経由) も満たすもの。既定値は定数 `kSafeRemovalIncludeNonUsb` (= `false`、USB のみ) |
 
 新方式の条件:
 
 1. ドライブレターを持つボリュームである (`GetDriveType` では絞らない)。
-2. ボリュームの devnode の ID が `STORAGE\Volume\` で始まる。光学ドライブとフロッピーはここで外れる。
+2. ボリュームの devnode が `GUID_DEVINTERFACE_CDROM` / `GUID_DEVINTERFACE_FLOPPY` を登録していない (= ドライブ自身がボリュームを兼ねる光学ドライブ・フロッピーではない)。光学ドライブとフロッピーはここで外れる。
 3. ボリュームに `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行し、`DeviceType` が `FILE_DEVICE_DISK` で、同じ番号のディスク (`GUID_DEVINTERFACE_DISK`) がある。
 4. ディスクの devnode から親をたどると、親が USB ハブのノード (USB デバイス本体) がある。
 5. ディスクの devnode の取り外しポリシーが `ExpectNoRemoval` 以外である。
@@ -394,21 +397,25 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 | UAS 接続の機器 (ID が `SCSI\Disk&...`) | 抽出しない | 抽出する |
 | ノート PC の内蔵 USB カードリーダー | 抽出する | 取り外しポリシー次第。`excludeInternalUsb` で除外できる |
 
-`-f letters` で両方式の結果を 1 ドライブ 1 行で比べられます。
+新方式の手順 (使う API、引数、判定) は [docs/new-method-flow.md](docs/new-method-flow.md) に、タスクトレイ方式の手順は [docs/safe-removal-flow.md](docs/safe-removal-flow.md) に、判定で見ているインスタンス ID の成り立ちは [docs/instance-id.md](docs/instance-id.md) に、異なる GUID のインターフェイスが同じ devnode を指すケースの図解は [docs/device-interfaces.html](docs/device-interfaces.html) に、VID:PID (+ シリアル) で許可する機器を指定するホワイトリスト方式の設計は [docs/whitelist-flow.md](docs/whitelist-flow.md) にまとめています。
+
+`-f letters` で 3 方式の結果を 1 ドライブ 1 行で比べられます。
 
 ```
-Drv  DriveType  Legacy    New       Diff         New: result                              Disk
-C:   FIXED      -         -         same         not USB                                  CT1000P310SSD8
+Drv  DriveType  Legacy    New       Safe      Diff         New: result                              Safe: node / result              Disk
+C:   FIXED      -         -         -         same         not USB                                  not USB                          CT1000P310SSD8
 ```
 
 | 列 | 意味 |
 |---|---|
-| `Legacy` / `New` | その方式で抽出されれば `selected` |
-| `Diff` | `same` (結果が同じ)、`LEGACY ONLY`、`NEW ONLY` |
+| `Legacy` / `New` / `Safe` | その方式で抽出されれば `selected`。`Safe` はタスクトレイ方式 |
+| `Diff` | 既存方式と新方式の比較。`same` (結果が同じ)、`LEGACY ONLY`、`NEW ONLY` |
 | `New: result` | 新方式で抽出した、または除外した理由 |
+| `Safe: node / result` | タスクトレイ方式で抽出したときは、`SafeRemovalRequired` が TRUE だったノードの名前 (タスクトレイの一覧に出る名前と見比べる)。除外したときはその理由 |
 | `Disk` | ボリュームが載っているディスクの名前 |
 
-`-f json` / `-f text` の `driveLetters[]` には、`legacyDetail` (既存方式が見ている各チェックの結果) と `newDetail` (ディスク番号、ディスクと USB デバイス本体のインスタンス ID、取り外しポリシー、`capRemovable`、`inLocalMachineContainer`) も出力します。
+`-f json` / `-f text` の `driveLetters[]` には、`legacyDetail` (既存方式が見ている各チェックの結果) と `newDetail` (ディスク番号、ディスクと USB デバイス本体のインスタンス ID、ディスクの列挙子 (`diskEnumerator`)、ハブから読んだ VID:PID (`usbVidPid`)、取り外しポリシー、`capRemovable`、`inLocalMachineContainer`)、`safeRemovalDetail` (タスクトレイ方式の結果、ディスク自身の `SafeRemovalRequired`、TRUE だったノードのインスタンス ID と名前) も出力します。
+`-f code` には、タスクトレイ方式の結果はまだ含めていません。
 
 ## 判定方法について
 
@@ -420,7 +427,7 @@ C:   FIXED      -         -         same         not USB                        
 
 ボリュームを起点にする場合は、ボリュームのインターフェイスで `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行し、`DeviceType` が `FILE_DEVICE_DISK` のものだけを残してから、ディスク番号で対応付けたディスクに 2、3 の条件を適用します。
 光学ドライブは `DeviceType` が `FILE_DEVICE_CD_ROM` になるので、これで除外できます。
-ただし、フロッピーは `DeviceType` が `FILE_DEVICE_DISK` になるので、この確認では除外できません。ボリュームのインスタンス ID が `STORAGE\Volume\` で始まるものだけをディスク番号で対応付け、それ以外はインスタンス ID の devnode 自身から親をたどってください (「volumeInterfaces[] の各項目」を参照)。
+ただし、フロッピーは `DeviceType` が `FILE_DEVICE_DISK` になるので、この確認では除外できません。ボリュームの devnode が `GUID_DEVINTERFACE_CDROM` / `GUID_DEVINTERFACE_FLOPPY` を登録しているもの (ドライブ自身) は、その devnode 自身から親をたどり、それ以外だけをディスク番号で対応付けてください (「volumeInterfaces[] の各項目」を参照)。
 ボリュームを持たないディスク (未フォーマットなど) は一覧に現れません。
 
 WPD デバイスの有無 (`wpdDevice`) は判定には使わず、比較用に出力しています。WPD を判定に使う場合は次の点に注意してください。
