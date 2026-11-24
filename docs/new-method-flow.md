@@ -58,7 +58,7 @@ VID:PID で機器を指定するのではなく、**USB 経由で接続された
 | `SetupDiEnumDeviceInterfaces` / `SetupDiGetDeviceInterfaceDetailW` | 2. と同じ | `DevicePath` とボリュームの `DevInst` (= `DriveEntry.devInst`) を得る |
 | `GetVolumeNameForVolumeMountPointW` | `DevicePath + L"\\"` | 1. の表と GUID を `_wcsicmp` で比べる。一致するレターがなければ対象外 |
 | `CM_Get_Device_IDW` | ボリュームの `DevInst` | ボリュームの devnode の ID を得る |
-| `CM_Get_Device_Interface_List_SizeW` | `&GUID_DEVINTERFACE_CDROM`、`&GUID_DEVINTERFACE_FLOPPY` のそれぞれ, ボリュームの devnode の ID, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | どちらかで返った長さが 1 より大きければ対象外 (ボリュームの devnode がドライブ自身)。**光学ドライブとフロッピーはここで外れる** |
+| `CM_Get_Device_Interface_List_SizeW` + `CM_Get_Device_Interface_ListW` | `&GUID_DEVINTERFACE_CDROM`、`&GUID_DEVINTERFACE_FLOPPY` のそれぞれ, ボリュームの devnode の ID, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | どちらかで一覧が空でなければ対象外 (ボリュームの devnode がドライブ自身)。**光学ドライブとフロッピーはここで外れる** |
 | `CreateFileW` + `DeviceIoControl` | `DevicePath` に `IOCTL_STORAGE_GET_DEVICE_NUMBER` | 失敗したら対象外 (複数ディスクにまたがるボリューム)。`DeviceType != FILE_DEVICE_DISK` なら対象外 |
 | (表引き) | `DeviceNumber` で 2. の表を引く | 見つからなければ対象外 |
 
@@ -81,10 +81,10 @@ VID:PID で機器を指定するのではなく、**USB 経由で接続された
 |---|---|---|
 | `CM_Get_Parent` | ディスクの `DevInst` から順に親へ | `CR_SUCCESS` でなくなったら (ルートに着いたら) USB でないので対象外 |
 | `CM_Get_Device_IDW` | 親の `DevInst` | 親の ID を得る |
-| `CM_Get_Device_Interface_List_SizeW` | `&GUID_DEVINTERFACE_USB_HUB`, 親の ID, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | 返った長さが 1 より大きければ、親は USB ハブ。そのとき**子のほう**を USB デバイス本体とする |
+| `CM_Get_Device_Interface_List_SizeW` + `CM_Get_Device_Interface_ListW` | `&GUID_DEVINTERFACE_USB_HUB`, 親の ID, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | 一覧が空でなければ、親は USB ハブ。そのとき**子のほう**を USB デバイス本体とする |
 
 コードでは `findUsbDevice()` と `isUsbHubNode()` です。
-インターフェイスを持たないノードでも、終端の NUL 1 文字ぶんの長さ (1) が返るので、1 より大きいかで判定します。
+インターフェイスがあるかは、一覧を実際に取得し、最初の文字列が空でないかで判定します (`hasInterface()`)。インターフェイスがないときに `CM_Get_Device_Interface_List_SizeW` が返す長さはドキュメントに記載がないので、長さだけでは判定しません。
 
 BOT (`USBSTOR\Disk&...`)、UAS (`SCSI\Disk&...`)、ハブ経由のいずれでも、この方法で USB デバイス本体 (`USB\VID_...`) に着くことを確認しています ([findings.md](findings.md))。
 UAS 接続のディスクの ID は内蔵 NVMe (`SCSI\Disk&Ven_NVMe&...`) と同じ形なので、ID の文字列では USB かどうかを判別できません。親をたどる必要があるのはこのためです。
@@ -93,9 +93,10 @@ UAS 接続のディスクの ID は内蔵 NVMe (`SCSI\Disk&Ven_NVMe&...`) と同
 
 | API | 主な引数 | 判定 |
 |---|---|---|
-| `CM_Get_DevNode_PropertyW` | **ディスク**の `DevInst`, `&DEVPKEY_Device_RemovalPolicy` (`DEVPROP_TYPE_UINT32`) | 取得できない、または `CM_REMOVAL_POLICY_EXPECT_NO_REMOVAL` (1) なら対象外。`ExpectOrderlyRemoval` (2)、`ExpectSurpriseRemoval` (3) なら次へ |
+| `CM_Get_DevNode_PropertyW` | **ディスク**の `DevInst`, `&DEVPKEY_Device_RemovalPolicy` (`DEVPROP_TYPE_INT32` または `DEVPROP_TYPE_UINT32`) | 取得できない、または `CM_REMOVAL_POLICY_EXPECT_NO_REMOVAL` (1) なら対象外。`ExpectOrderlyRemoval` (2)、`ExpectSurpriseRemoval` (3) なら次へ |
 
 USB デバイス本体ではなく、ディスクの devnode の値を見ます。
+型はドキュメント上 `DEVPROP_TYPE_INT32` ですが、実機では `DEVPROP_TYPE_UINT32` で返ったので、両方を受け付けます (`getU32()`。手順 6 の `Capabilities` も同じ)。
 内蔵 NVMe は `ExpectNoRemoval`、調べた USB 機器はすべて `ExpectSurpriseRemoval` でした ([findings.md](findings.md))。
 ノート PC の内蔵カードリーダーのような、USB 接続だが内蔵の機器を、ここで外せることを期待しています (未確認)。
 
@@ -156,7 +157,7 @@ if ((userRemovalPolicy == RemovalPolicyExpectOrderlyRemoval) ||
 
 | API | 主な引数 | 判定 |
 |---|---|---|
-| `CM_Get_DevNode_PropertyW` | **USB デバイス本体**の `DevInst`, `&DEVPKEY_Device_Capabilities` (`DEVPROP_TYPE_UINT32`) | `CM_DEVCAP_REMOVABLE` が立っていなければ対象外。プロパティが取得できないときは除外しない |
+| `CM_Get_DevNode_PropertyW` | **USB デバイス本体**の `DevInst`, `&DEVPKEY_Device_Capabilities` (`DEVPROP_TYPE_INT32` または `DEVPROP_TYPE_UINT32`) | `CM_DEVCAP_REMOVABLE` が立っていなければ対象外。プロパティが取得できないときは除外しない |
 
 `CM_DEVCAP_REMOVABLE` は、USB の非ストレージ機器では内蔵 (Bluetooth アダプターなど) と外付けを正しく分けました。内蔵の USB ストレージで分けられるかは未確認です。
 ACPI の記述 (`_UPC`、`_PLD`) に依存するため、記述が不正確な機種では、内蔵機器が取り外し可能と報告されることがあります。

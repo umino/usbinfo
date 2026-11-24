@@ -69,10 +69,10 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体 (親は U
 | `SetupDiEnumDeviceInterfaces` | 同じ GUID、index を 0 から増やす | `FALSE` で終了 |
 | `SetupDiGetDeviceInterfaceDetailW` | 2 段階呼び出し、`SP_DEVINFO_DATA` も受け取る | `DevicePath` とディスクの `DevInst` を得る |
 | `CM_Get_Parent` | ディスクの `DevInst` から順に親へ | ルートまでたどっても下記に当たらなければ USB でないので対象外 |
-| `CM_Get_Device_IDW` + `CM_Get_Device_Interface_List_SizeW` | 親の ID, `&GUID_DEVINTERFACE_USB_HUB`, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | 返った長さが 1 より大きければ親は USB ハブ。そのとき**子のほう**を USB デバイス本体とする (新方式の `findUsbDevice()` と同じ) |
+| `CM_Get_Device_IDW` + `CM_Get_Device_Interface_List_SizeW` + `CM_Get_Device_Interface_ListW` | 親の ID, `&GUID_DEVINTERFACE_USB_HUB`, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | 一覧が空でなければ親は USB ハブ。そのとき**子のほう**を USB デバイス本体とする (新方式の `findUsbDevice()` と同じ) |
 | `CM_Get_Device_Interface_ListW` | `&GUID_DEVINTERFACE_USB_HUB`, ハブの ID, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | ハブのインターフェイスパスを得る |
-| `CM_Get_DevNode_PropertyW` | USB デバイス本体, `&DEVPKEY_Device_Address` | ハブ上のポート番号を得る。取得できない、または 0 なら対象外 |
-| `CreateFileW` | ハブのインターフェイスパス, `GENERIC_WRITE`, `FILE_SHARE_WRITE`, `OPEN_EXISTING` | 開けなければ対象外。usbinfo と同じ開き方で、管理者権限は不要 |
+| `CM_Get_DevNode_PropertyW` | USB デバイス本体, `&DEVPKEY_Device_Address` (`DEVPROP_TYPE_INT32` または `DEVPROP_TYPE_UINT32`) | ハブ上のポート番号を得る。取得できない、または 0 なら対象外 |
+| `CreateFileW` | ハブのインターフェイスパス, `GENERIC_WRITE`, `FILE_SHARE_WRITE`, `OPEN_EXISTING` | 開けなければ対象外。usbinfo と同じ開き方 (下記の補足を参照) |
 | `DeviceIoControl` | `IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX` → `USB_NODE_CONNECTION_INFORMATION_EX` (`ConnectionIndex` = ポート番号) | 失敗した、または `ConnectionStatus != DeviceConnected` なら対象外。`DeviceDescriptor.idVendor` / `idProduct` / `iSerialNumber` を得る |
 | `DeviceIoControl` | `IOCTL_USB_GET_NODE_CONNECTION_DRIVERKEY_NAME` → `USB_NODE_CONNECTION_DRIVERKEY_NAME` (`ConnectionIndex` = ポート番号) | 返った `DriverKeyName` が USB デバイス本体の `DEVPKEY_Device_Driver` と `_wcsicmp` で一致しなければ対象外 (別のポートの機器を読んでいないことの確認) |
 | `DeviceIoControl` | `IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION` (`ConnectionIndex` = ポート番号, `SetupPacket.wValue = (USB_STRING_DESCRIPTOR_TYPE << 8) \| 0`, `wIndex = 0`, `wLength = 255`) | `SERIAL` 付きのエントリがあり、`iSerialNumber` が 0 でないときだけ。対応言語 ID の一覧を読み、先頭の言語 ID を使う。読めなければ `0x0409` |
@@ -93,6 +93,8 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体 (親は U
 - 親が USB ハブであることで USB デバイス本体を見分けるので、ハブ経由の接続でも上流のハブと取り違えません。複合デバイスでも、止まるのは `&MI_xx` のインターフェイスのノードではなく、ハブ直下のデバイス本体です。
 - BOT (`USBSTOR\Disk&...`)、UAS (`SCSI\Disk&...`)、ハブ経由のいずれでも、ディスクから親をたどると USB ハブ直下の USB デバイス本体に着くことは、新方式の調査で確認しています ([findings.md](findings.md))。
 - USB デバイスの `DEVPKEY_Device_Address` がハブのポート番号であることは、`DEVICE_CAPABILITIES.Address` の説明に記載があります ([DEVICE_CAPABILITIES](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_device_capabilities): "USB: The port number")。ドライバーキー名の照合は、その対応が正しいことの念のための確認です。usbinfo では `connection.driverKeyMatchesDevnode` で同じ確認をしています。
+- `DEVPKEY_Device_Address` の型はドキュメント上 `DEVPROP_TYPE_INT32` ですが、新方式の取り外しポリシーと同じく、実機では `DEVPROP_TYPE_UINT32` で返ることがあるので両方を受け付けます。
+- ハブを `GENERIC_WRITE` で開けば、管理者権限なしでハブの IOCTL が通ることは、**ドキュメントに記載がなく、観察が根拠です** (usbinfo を管理者権限なしで実行して確認。Microsoft の USBView サンプルも同じ開き方)。必要な権限が変わると、ハブを開けずにすべての機器が対象外になります。
 - 3 つの IOCTL は、いずれも USB ハブ (`GUID_DEVINTERFACE_USB_HUB`) に発行するユーザーモード向けの要求です ([IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ni-usbioctl-ioctl_usb_get_node_connection_information_ex)、[IOCTL_USB_GET_NODE_CONNECTION_DRIVERKEY_NAME](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ni-usbioctl-ioctl_usb_get_node_connection_driverkey_name)、[IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ni-usbioctl-ioctl_usb_get_descriptor_from_node_connection))。
 - 文字列ディスクリプタの読み取りは機器との通信を伴うので、機器がサスペンド中などで失敗することがあります (usbinfo では `(read failed)` と表示)。失敗したときは `SERIAL` 付きのエントリに一致させないので、誤って抽出する方向には倒れません。機種単位のエントリ (`SERIAL` なし) の照合には影響しません。
 - インスタンス ID からシリアル番号を切り出す方式と違い、`CM_DEVCAP_UNIQUEID` が立っていない機器や、`IgnoreHWSerNum` が設定された機器でも、機器が持つシリアル番号で照合できます。

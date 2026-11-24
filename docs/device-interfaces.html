@@ -271,7 +271,7 @@ ul { margin: 0; padding-left: 1.25rem; display: grid; gap: .5rem; }
     <ul>
       <li><strong>光学ドライブ・フロッピーの判定</strong> (<code>ownsDriveInterface</code> / <code>isDriveOwnedVolume</code>): 図 1 の性質を使っています。ボリュームの devnode が CDROM か FLOPPY のインターフェイスも登録していれば、ドライブ自身と判定します。</li>
       <li><strong>ボリュームとドライブの対応付け</strong> (<code>volumeBelongs</code>): DevInst の数値ではなく、インスタンス ID の文字列で比べています。上の表に照らしても安全な方法です。</li>
-      <li><strong><code>-f letters</code> の <code>Diff</code> 列</strong> (<code>compareDriveSelection</code>): 既存方式と新方式で別々に列挙した <code>DevInst</code> を、数値で比べています。実装上はおそらく同じ値になりますが、ドキュメント上の保証はありません。</li>
+      <li><strong><code>-f letters</code> の <code>Diff</code> 列</strong> (<code>compareDriveSelection</code>): 既存方式と新方式で別々に列挙した <code>DevInst</code> を、それぞれインスタンス ID に直して比べています。以前は数値で比べていましたが、ドキュメント上の保証がないので改めました。</li>
     </ul>
   </section>
 

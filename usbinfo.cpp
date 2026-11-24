@@ -1779,21 +1779,34 @@ struct NewTrace {
     const wchar_t* result = L"";   // 採用 / 除外の理由
 };
 
+// 32 ビット整数のプロパティを読む。
+// DEVPKEY_Device_RemovalPolicy / Capabilities / Address はドキュメント上 DEVPROP_TYPE_INT32 だが、
+// 実機では DEVPROP_TYPE_UINT32 で返った。どちらの型でも受け付ける (値はどれも 0 以上)。
 static bool getU32(DEVINST di, const DEVPROPKEY& key, DWORD& out)
 {
     DEVPROPTYPE type = 0;
     ULONG size = sizeof(out);
-    return CM_Get_DevNode_PropertyW(di, &key, &type, (PBYTE)&out, &size, 0) == CR_SUCCESS && type == DEVPROP_TYPE_UINT32;
+    return CM_Get_DevNode_PropertyW(di, &key, &type, (PBYTE)&out, &size, 0) == CR_SUCCESS &&
+           (type == DEVPROP_TYPE_UINT32 || type == DEVPROP_TYPE_INT32);
 }
 
 // devnode (ID で指定) が、指定したクラスのデバイスインターフェイスを有効な状態で登録しているか
+// 一覧を実際に取得し、最初の文字列が空でないかで判定する
+// (インターフェイスがないときに _Size が返す長さは、ドキュメントに記載がないので当てにしない)
 static bool hasInterface(const std::wstring& id, const GUID& g)
 {
-    ULONG len = 0;
-    if (id.empty() ||
-        CM_Get_Device_Interface_List_SizeW(&len, const_cast<LPGUID>(&g), const_cast<DEVINSTID_W>(id.c_str()),
-                                           CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS) return false;
-    return len > 1;   // インターフェイスがなくても終端の NUL 1 文字ぶんが返る
+    if (id.empty()) return false;
+    for (int retry = 0; retry < 3; ++retry) {
+        ULONG len = 0;
+        if (CM_Get_Device_Interface_List_SizeW(&len, const_cast<LPGUID>(&g), const_cast<DEVINSTID_W>(id.c_str()),
+                                               CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS || len == 0) return false;
+        std::vector<wchar_t> buf((size_t)len + 1, L'\0');
+        CONFIGRET cr = CM_Get_Device_Interface_ListW(const_cast<LPGUID>(&g), const_cast<DEVINSTID_W>(id.c_str()),
+                                                     buf.data(), len, CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+        if (cr == CR_BUFFER_SMALL) continue;   // 取得の間にインターフェイスが増えた
+        return cr == CR_SUCCESS && buf[0] != L'\0';
+    }
+    return false;
 }
 
 static bool isUsbHubNode(DEVINST di)
@@ -2065,7 +2078,8 @@ static void compareDriveSelection(Node& arr, bool excludeInternalUsb)
         r.str(L"legacy", le ? L"selected" : L"-");
         r.str(L"new", ne ? L"selected" : L"-");
         r.str(L"safeRemoval", se ? L"selected" : L"-");
-        r.str(L"diff", le && ne ? (le->devInst == ne->devInst ? L"same" : L"same drive, different devinst") :
+        // devinst は「不透明なハンドル」なので数値では比べず、指す devnode のインスタンス ID で比べる
+        r.str(L"diff", le && ne ? (_wcsicmp(devInstId(le->devInst).c_str(), devInstId(ne->devInst).c_str()) == 0 ? L"same" : L"same drive, different devinst") :
                        le ? L"LEGACY ONLY" : ne ? L"NEW ONLY" : L"same");
         Node& lo = r.obj(L"legacyDetail");
         lo.boolean(L"driveTypeRemovable", dt == DRIVE_REMOVABLE);

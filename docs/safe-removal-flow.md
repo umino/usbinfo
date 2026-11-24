@@ -52,7 +52,7 @@ Windows は、`DEVPKEY_Device_SafeRemovalRequired` が TRUE のデバイスが�
 | API | 主な引数 | 判定 |
 |---|---|---|
 | `CM_Get_Parent` | ディスクの `DevInst` から順に親へ | |
-| `CM_Get_Device_IDW` + `CM_Get_Device_Interface_List_SizeW` | 親の ID, `&GUID_DEVINTERFACE_USB_HUB`, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | 返った長さが 1 より大きい親 (USB ハブ) があれば USB 経由。なければ、`includeNonUsb` が false のとき対象外 |
+| `CM_Get_Device_IDW` + `CM_Get_Device_Interface_List_SizeW` + `CM_Get_Device_Interface_ListW` | 親の ID, `&GUID_DEVINTERFACE_USB_HUB`, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | 一覧が空でない親 (USB ハブ) があれば USB 経由。なければ、`includeNonUsb` が false のとき対象外 |
 
 新方式の手順 4 (`findUsbDevice()`) と同じです。
 
