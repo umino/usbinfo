@@ -1,0 +1,290 @@
+<title>インターフェイスと devnode</title>
+<meta charset="utf-8">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+JP:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: one reading column (~44rem); figures may scroll sideways inside their own frame. Blueprint palette shared with the repo's other guides. */
+:root {
+  --bg: #f2f6fa; --surface: #ffffff; --line: #c9d5e2; --line-strong: #7d8ea2;
+  --fg: #0f1a26; --dim: #4d6074;
+  --iface: #145f99; --iface-soft: rgba(20,95,153,.10);
+  --node: #a34700; --node-soft: rgba(163,71,0,.10);
+  --font-body: 'IBM Plex Sans JP', 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'Consolas', monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1520; --surface: #132031; --line: #26374f; --line-strong: #6a7d98;
+    --fg: #e3ecf5; --dim: #97abc0;
+    --iface: #7cc0f0; --iface-soft: rgba(124,192,240,.12);
+    --node: #ffb547; --node-soft: rgba(255,181,71,.12);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1520; --surface: #132031; --line: #26374f; --line-strong: #6a7d98;
+  --fg: #e3ecf5; --dim: #97abc0;
+  --iface: #7cc0f0; --iface-soft: rgba(124,192,240,.12);
+  --node: #ffb547; --node-soft: rgba(255,181,71,.12);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 1rem; line-height: 1.75;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 2.5rem 4rem;
+}
+main { max-width: 46rem; margin: 0 auto; display: flex; flex-direction: column; gap: 2.75rem; }
+section { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+h1 { font-size: clamp(1.75rem, 5vw, 2.4rem); line-height: 1.3; margin: 0; font-weight: 600; text-wrap: balance; }
+h2 { font-size: 1.35rem; line-height: 1.4; margin: 0; font-weight: 600; text-wrap: balance; }
+p { margin: 0; }
+.eyebrow { font-family: var(--font-mono); font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+.lead { font-size: 1.1rem; color: var(--fg); }
+code { font-family: var(--font-mono); font-size: .88em; background: var(--surface); border: 1px solid var(--line); border-radius: 3px; padding: 0 .3em; overflow-wrap: anywhere; }
+a { color: var(--iface); }
+a:focus-visible { outline: 2px solid var(--node); outline-offset: 2px; }
+
+.answer { border: 1px solid var(--line); background: var(--surface); border-radius: 4px; padding: 1rem 1.25rem; display: grid; gap: .5rem; }
+.answer p { display: grid; grid-template-columns: auto 1fr; gap: .75rem; align-items: baseline; }
+.answer b { font-family: var(--font-mono); font-size: .8rem; font-weight: 600; color: var(--dim); white-space: nowrap; }
+
+figure { margin: 0; display: flex; flex-direction: column; gap: .6rem; }
+.frame { overflow-x: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+.frame svg { display: block; width: 100%; min-width: 640px; height: auto; }
+figcaption { font-size: .9rem; color: var(--dim); }
+
+/* SVG classes (styled from the page so both themes apply) */
+.s-iface { fill: var(--iface-soft); stroke: var(--iface); stroke-width: 1.5; }
+.s-node { fill: var(--node-soft); stroke: var(--node); stroke-width: 1.5; }
+.s-inner { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1; }
+.s-rule { stroke: var(--line-strong); stroke-width: 1; }
+.s-arrow { stroke: var(--fg); stroke-width: 1.5; fill: none; }
+.s-dash { stroke: var(--dim); stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+.s-head { fill: var(--fg); }
+.t { fill: var(--fg); font-family: var(--font-body); font-size: 13px; }
+.t-dim { fill: var(--dim); font-family: var(--font-body); font-size: 12px; }
+.t-eye-i { fill: var(--iface); font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; }
+.t-eye-n { fill: var(--node); font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; }
+.m { fill: var(--fg); font-family: var(--font-mono); font-size: 12px; }
+.m-b { fill: var(--fg); font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; }
+.m-dim { fill: var(--dim); font-family: var(--font-mono); font-size: 11.5px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; font-size: .85rem; color: var(--dim); }
+.legend span { display: inline-flex; align-items: center; gap: .4rem; }
+.sw { width: .9rem; height: .9rem; border-radius: 2px; border: 1.5px solid; display: inline-block; }
+.sw.i { background: var(--iface-soft); border-color: var(--iface); }
+.sw.n { background: var(--node-soft); border-color: var(--node); }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: .9rem; }
+th, td { text-align: left; vertical-align: top; padding: .6rem .8rem; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; font-size: .8rem; color: var(--dim); background: var(--bg); }
+tr:last-child td { border-bottom: none; }
+td code { white-space: nowrap; }
+.chip { display: inline-block; font-size: .75rem; font-weight: 600; padding: .1rem .5rem; border-radius: 999px; white-space: nowrap; border: 1px solid; }
+.chip.i { color: var(--iface); background: var(--iface-soft); border-color: var(--iface); }
+.chip.n { color: var(--node); background: var(--node-soft); border-color: var(--node); }
+
+ul { margin: 0; padding-left: 1.25rem; display: grid; gap: .5rem; }
+.note { font-size: .9rem; color: var(--dim); }
+</style>
+
+<main>
+  <header style="display:flex;flex-direction:column;gap:.75rem">
+    <span class="eyebrow">usbinfo / docs</span>
+    <h1>インターフェイスと devnode</h1>
+    <p class="lead">別々のデバイスインターフェイスクラス (GUID) で列挙しても、たどった先の devnode が同じになることがあります。そのとき何が同じで何が違うかをまとめます。</p>
+  </header>
+
+  <div class="answer">
+    <p><b>被るか</b><span>被ります。1 つの devnode が、複数のインターフェイスクラスを登録できるためです。光学ドライブとフロッピーがその例です。</span></p>
+    <p><b>同じか</b><span>devnode に付いている値 (DevInst が指す先、セットアップクラス、デバイスのプロパティ) は同じです。インターフェイスに付いている値 (GUID、DevicePath、有効かどうか) は違います。</span></p>
+    <p><b>開くと</b><span>どちらの DevicePath を <code>CreateFile</code> しても、同じデバイススタックに I/O が届きます。IOCTL の結果も通常は同じです。</span></p>
+  </div>
+
+  <section>
+    <span class="eyebrow">前提</span>
+    <h2>インターフェイスは「入口」、devnode は「実体」</h2>
+    <p>devnode はデバイスツリー上のノードで、1 台のデバイス (または論理的なデバイス) を表します。デバイスインターフェイスは、ドライバーがその devnode に登録する「アプリから開くための入口」です。入口にはそれぞれ種類 (インターフェイスクラスの GUID) と、開くためのパス (<code>DevicePath</code>) があります。</p>
+    <p>ドライバーは 1 つの devnode に、対応する機能の数だけ入口を登録できます (<a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/install/overview-of-device-interface-classes">Overview of Device Interface Classes</a>)。</p>
+    <div class="legend" aria-hidden="true">
+      <span><i class="sw i"></i>インターフェイス (入口)。GUID ごとに別</span>
+      <span><i class="sw n"></i>devnode (実体)</span>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">図 1</span>
+    <h2>被る例: 光学ドライブ</h2>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 320" role="img" aria-label="CDROM と VOLUME の 2 つのインターフェイスが、どちらも同じ光学ドライブの devnode を指している">
+          <defs>
+            <marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="s-head"/>
+            </marker>
+          </defs>
+
+          <!-- interface A -->
+          <rect x="20" y="30" width="270" height="112" rx="4" class="s-iface"/>
+          <text x="36" y="54" class="t-eye-i">INTERFACE</text>
+          <text x="36" y="78" class="m-b">GUID_DEVINTERFACE_CDROM</text>
+          <text x="36" y="100" class="m-dim">{53F56308-B6BF-11D0-…}</text>
+          <text x="36" y="126" class="m-dim">\\?\usbstor#cdrom…#{53f56308…}</text>
+
+          <!-- interface B -->
+          <rect x="20" y="178" width="270" height="112" rx="4" class="s-iface"/>
+          <text x="36" y="202" class="t-eye-i">INTERFACE</text>
+          <text x="36" y="226" class="m-b">GUID_DEVINTERFACE_VOLUME</text>
+          <text x="36" y="248" class="m-dim">{53F5630D-B6BF-11D0-…}</text>
+          <text x="36" y="274" class="m-dim">\\?\usbstor#cdrom…#{53f5630d…}</text>
+
+          <!-- arrows -->
+          <path d="M290,86 C380,86 380,130 466,130" class="s-arrow" marker-end="url(#ah1)"/>
+          <path d="M290,234 C380,234 380,190 466,190" class="s-arrow" marker-end="url(#ah1)"/>
+          <text x="380" y="156" text-anchor="middle" class="t-dim">同じ devnode</text>
+          <text x="380" y="174" text-anchor="middle" class="t-dim">(DevInst)</text>
+
+          <!-- devnode -->
+          <rect x="470" y="20" width="270" height="280" rx="4" class="s-node"/>
+          <text x="486" y="44" class="t-eye-n">DEVNODE</text>
+          <text x="486" y="68" class="m-b">USBSTOR\CdRom&amp;Ven_…</text>
+          <line x1="486" y1="82" x2="724" y2="82" class="s-rule"/>
+          <text x="486" y="104" class="t-dim">セットアップクラス</text>
+          <text x="486" y="124" class="m">CDROM {4d36e965-…}</text>
+          <text x="486" y="150" class="t-dim">デバイスのプロパティ</text>
+          <text x="486" y="170" class="m">DEVPKEY_Device_*</text>
+          <rect x="486" y="188" width="238" height="96" rx="3" class="s-inner"/>
+          <text x="500" y="210" class="t-dim">デバイススタック</text>
+          <text x="500" y="236" class="m">cdrom.sys     (FDO)</text>
+          <text x="500" y="262" class="m">usbstor.sys   (PDO)</text>
+        </svg>
+      </div>
+      <figcaption>光学ドライブのクラスドライバーは、ドライブ自身の devnode に CDROM と VOLUME の両方のインターフェイスを登録します。2 つの入口は DevicePath が違いますが、どちらを開いても同じデバイススタックに届きます。フロッピーも同じ形です (FLOPPY と VOLUME)。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <span class="eyebrow">図 2</span>
+    <h2>被らない例: ディスクとそのボリューム</h2>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 300" role="img" aria-label="DISK のインターフェイスはディスクの devnode を、VOLUME のインターフェイスは別のボリュームの devnode を指し、2 つはディスク番号でしか対応付かない">
+          <defs>
+            <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="s-head"/>
+            </marker>
+          </defs>
+
+          <rect x="20" y="30" width="270" height="84" rx="4" class="s-iface"/>
+          <text x="36" y="54" class="t-eye-i">INTERFACE</text>
+          <text x="36" y="78" class="m-b">GUID_DEVINTERFACE_DISK</text>
+          <text x="36" y="100" class="m-dim">{53F56307-B6BF-11D0-…}</text>
+
+          <rect x="20" y="186" width="270" height="84" rx="4" class="s-iface"/>
+          <text x="36" y="210" class="t-eye-i">INTERFACE</text>
+          <text x="36" y="234" class="m-b">GUID_DEVINTERFACE_VOLUME</text>
+          <text x="36" y="256" class="m-dim">{53F5630D-B6BF-11D0-…}</text>
+
+          <path d="M290,72 L466,72" class="s-arrow" marker-end="url(#ah2)"/>
+          <path d="M290,228 L466,228" class="s-arrow" marker-end="url(#ah2)"/>
+
+          <rect x="470" y="20" width="270" height="104" rx="4" class="s-node"/>
+          <text x="486" y="44" class="t-eye-n">DEVNODE</text>
+          <text x="486" y="68" class="m-b">USBSTOR\Disk&amp;Ven_…</text>
+          <text x="486" y="90" class="t-dim">クラス DiskDrive</text>
+          <text x="486" y="110" class="t-dim">親: USB デバイス本体</text>
+
+          <rect x="470" y="176" width="270" height="104" rx="4" class="s-node"/>
+          <text x="486" y="200" class="t-eye-n">DEVNODE</text>
+          <text x="486" y="224" class="m-b">STORAGE\Volume\…</text>
+          <text x="486" y="246" class="t-dim">クラス Volume</text>
+          <text x="486" y="266" class="t-dim">親: ROOT\volmgr\0000</text>
+
+          <path d="M605,126 L605,174" class="s-dash"/>
+          <text x="615" y="146" class="t-dim">ディスク番号で</text>
+          <text x="615" y="164" class="t-dim">対応付けるだけ</text>
+        </svg>
+      </div>
+      <figcaption>ディスクのボリュームは、ボリュームマネージャーがパーティションごとに作る別の devnode に登録されます。DevInst は被らず、ツリー上の親子関係もありません。両者は <code>IOCTL_STORAGE_GET_DEVICE_NUMBER</code> のディスク番号でしか結び付きません。</figcaption>
+    </figure>
+    <p class="note">Microsoft のドキュメントには「マウントできるディスクのドライバーは、DISK とマウント用 (VOLUME と同じ GUID) の両方を登録すべき」という例があります。ただし、このプロジェクトの実機調査では、ディスク自身の devnode に VOLUME のインターフェイスは見られず、ボリュームはすべて <code>STORAGE\Volume\…</code> の別 devnode にありました。</p>
+  </section>
+
+  <section>
+    <span class="eyebrow">一覧</span>
+    <h2>被る組み合わせ</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>デバイス</th><th>同じ devnode に登録されるインターフェイス</th><th>根拠</th></tr></thead>
+        <tbody>
+          <tr><td>光学ドライブ</td><td><code>GUID_DEVINTERFACE_CDROM</code> と <code>GUID_DEVINTERFACE_VOLUME</code></td><td>ドキュメントと実機の観察</td></tr>
+          <tr><td>フロッピー</td><td><code>GUID_DEVINTERFACE_FLOPPY</code> と <code>GUID_DEVINTERFACE_VOLUME</code></td><td>ドキュメントと実機の観察</td></tr>
+          <tr><td>外付け USB ハブ</td><td><code>GUID_DEVINTERFACE_USB_HUB</code> と <code>GUID_DEVINTERFACE_USB_DEVICE</code></td><td>推論 (ハブドライバーは、ハブにつながる USB デバイスすべてに USB_DEVICE を登録する。<a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-usb-device">ドキュメント</a>)。実機では未確認</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">本題</span>
+    <h2>同じ devnode に着いたとき、何が同じで何が違うか</h2>
+    <div class="legend">
+      <span><span class="chip i">インターフェイスごと</span> 列挙した GUID によって変わる</span>
+      <span><span class="chip n">devnode で共通</span> どの GUID から来ても同じ</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>値</th><th>取得元</th><th>扱い</th><th>補足</th></tr></thead>
+        <tbody>
+          <tr><td><code>InterfaceClassGuid</code></td><td><code>SP_DEVICE_INTERFACE_DATA</code></td><td><span class="chip i">インターフェイスごと</span></td><td>列挙に使った GUID そのもの</td></tr>
+          <tr><td><code>Flags</code> (有効か)</td><td><code>SP_DEVICE_INTERFACE_DATA</code></td><td><span class="chip i">インターフェイスごと</span></td><td>インターフェイスは 1 つずつ有効・無効になる</td></tr>
+          <tr><td><code>DevicePath</code></td><td><code>SP_DEVICE_INTERFACE_DETAIL_DATA</code></td><td><span class="chip i">インターフェイスごと</span></td><td>入口ごとに別のシンボリックリンク。中身は解析してはいけない文字列 (<a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-ioregisterdeviceinterface">IoRegisterDeviceInterface</a>)</td></tr>
+          <tr><td>インターフェイスのプロパティ</td><td><code>CM_Get_Device_Interface_Property</code></td><td><span class="chip i">インターフェイスごと</span></td><td><code>DEVPKEY_DeviceInterface_*</code> など</td></tr>
+          <tr><td><code>DevInst</code></td><td><code>SP_DEVINFO_DATA</code></td><td><span class="chip n">devnode で共通</span></td><td>指す devnode は同じ。ただし値は "opaque handle" で、別の列挙で同じ数値になる保証は書かれていない。比べるならインスタンス ID で</td></tr>
+          <tr><td><code>ClassGuid</code></td><td><code>SP_DEVINFO_DATA</code></td><td><span class="chip n">devnode で共通</span></td><td>devnode の<strong>セットアップクラス</strong> (CDROM など)。インターフェイスの GUID ではない (<a href="https://learn.microsoft.com/en-us/windows/win32/api/setupapi/ns-setupapi-sp_devinfo_data">SP_DEVINFO_DATA</a>)</td></tr>
+          <tr><td>インスタンス ID</td><td><code>CM_Get_Device_ID</code></td><td><span class="chip n">devnode で共通</span></td><td>同じ devnode かを確かめるにはこれを比べる</td></tr>
+          <tr><td>デバイスのプロパティ</td><td><code>CM_Get_DevNode_Property</code></td><td><span class="chip n">devnode で共通</span></td><td><code>DEVPKEY_Device_*</code> (取り外しポリシー、名前など)</td></tr>
+          <tr><td>IOCTL の結果</td><td><code>CreateFile</code> + <code>DeviceIoControl</code></td><td><span class="chip n">devnode で共通</span> (通常)</td><td>下記を参照</td></tr>
+          <tr><td><code>Reserved</code></td><td>両構造体</td><td>—</td><td>SetupAPI の内部用。使わない</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <span class="eyebrow">補足</span>
+    <h2>どちらの DevicePath を開いても同じ結果になる理由</h2>
+    <p>ドライバーはインターフェイスを、devnode の PDO (デバイススタックの最下段) に対して登録します (<a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-ioregisterdeviceinterface">IoRegisterDeviceInterface</a> の <code>PhysicalDeviceObject</code>)。どの入口から開いても I/O は同じスタックの最上段から流れるので、<code>IOCTL_STORAGE_GET_DEVICE_NUMBER</code> などの結果も同じになります。</p>
+    <p>例外は、登録時に「参照文字列 (reference string)」を付けた場合です。参照文字列はパスの一部になり、ドライバーは開かれた入口ごとに振る舞いを変えられます。ドキュメントには、使うのは swenum など一部のバスドライバーだけとあります。ストレージのクラスドライバーには当てはまらないと考えています。</p>
+  </section>
+
+  <section>
+    <span class="eyebrow">usbinfo</span>
+    <h2>このプロジェクトのコードとの関係</h2>
+    <ul>
+      <li><strong>光学ドライブ・フロッピーの判定</strong> (<code>ownsDriveInterface</code> / <code>isDriveOwnedVolume</code>): 図 1 の性質を使っています。ボリュームの devnode が CDROM か FLOPPY のインターフェイスも登録していれば、ドライブ自身と判定します。</li>
+      <li><strong>ボリュームとドライブの対応付け</strong> (<code>volumeBelongs</code>): DevInst の数値ではなく、インスタンス ID の文字列で比べています。上の表に照らしても安全な方法です。</li>
+      <li><strong><code>-f letters</code> の <code>Diff</code> 列</strong> (<code>compareDriveSelection</code>): 既存方式と新方式で別々に列挙した <code>DevInst</code> を、数値で比べています。実装上はおそらく同じ値になりますが、ドキュメント上の保証はありません。</li>
+    </ul>
+  </section>
+
+  <section>
+    <span class="eyebrow">参照</span>
+    <h2>参照したドキュメント</h2>
+    <ul>
+      <li><a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/install/overview-of-device-interface-classes">Overview of Device Interface Classes</a>: 1 つのデバイスが複数のインターフェイスクラスを登録できること</li>
+      <li><a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-ioregisterdeviceinterface">IoRegisterDeviceInterface</a>: PDO に対する登録、参照文字列、シンボリックリンク名の扱い</li>
+      <li><a href="https://learn.microsoft.com/en-us/windows/win32/api/setupapi/ns-setupapi-sp_devinfo_data">SP_DEVINFO_DATA</a> / <a href="https://learn.microsoft.com/en-us/windows/win32/api/setupapi/ns-setupapi-sp_device_interface_data">SP_DEVICE_INTERFACE_DATA</a>: 各メンバーの意味</li>
+      <li><a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-cdrom">GUID_DEVINTERFACE_CDROM</a> / <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-floppy">FLOPPY</a> / <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-volume">VOLUME</a> / <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-usb-device">USB_DEVICE</a>: 各インターフェイスと登録するドライバー</li>
+      <li><a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/supporting-mount-manager-requests-in-a-storage-class-driver">Supporting Mount Manager Requests in a Storage Class Driver</a>: ボリュームのインターフェイスを登録するのはボリュームを扱うドライバー</li>
+      <li><a href="instance-id.md">instance-id.md</a>: 各 devnode のインスタンス ID の成り立ち</li>
+    </ul>
+  </section>
+</main>
