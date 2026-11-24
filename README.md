@@ -394,6 +394,8 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 | UAS 接続の機器 (ID が `SCSI\Disk&...`) | 抽出しない | 抽出する |
 | ノート PC の内蔵 USB カードリーダー | 抽出する | 取り外しポリシー次第。`excludeInternalUsb` で除外できる |
 
+VID:PID (+ シリアル) で許可する機器を指定するホワイトリスト方式の設計は [docs/whitelist-flow.md](docs/whitelist-flow.md) にまとめています。
+
 `-f letters` で両方式の結果を 1 ドライブ 1 行で比べられます。
 
 ```
