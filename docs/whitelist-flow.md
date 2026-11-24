@@ -45,7 +45,7 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 
 - 仮想 CD-ROM は手順 1 で外れるので、ELECOM の暗号化 USB メモリも VID:PID を 1 行書くだけで済みます。
 - `lun=` は、1 台に**ディスクが 2 つ以上**見える機器 (公開領域と暗号化領域が両方ディスクとして見える機器、複数スロットのカードリーダーなど) で、どちらかだけを許可したいときに使います。
-- `SERIAL` には、USB の文字列ディスクリプタの値ではなく、**インスタンス ID に入っている値**を登録します。Windows はシリアル番号に使えない文字 (空白、`,`、0x20 未満や 0x7F 超の文字) を `_` に置き換えてインスタンス ID にするため、ディスクリプタの値と一致しないことがあります。登録する値は `usbinfo -f json` の `usbDevices[].devnode.instanceId` で確認できます。
+- `SERIAL` には、USB の文字列ディスクリプタの値ではなく、**インスタンス ID に入っている値**を登録します。ディスクリプタの値がそのままインスタンス ID になる保証はありません (使えない文字を含むシリアルの扱いは、Microsoft のドキュメントに記載がなく未確認です。[instance-id.md](instance-id.md) を参照)。登録する値は `usbinfo -f json` の `usbDevices[].devnode.instanceId` で確認できます。
 
 ## フロー
 
@@ -168,7 +168,7 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 | ディスクの取り外しポリシーが `ExpectNoRemoval` 以外 | 許可するかは VID:PID で決めるため |
 | USB デバイスに `CM_DEVCAP_REMOVABLE` が立っている | 同上 |
 | 親が USB ハブであること (`GUID_DEVINTERFACE_USB_HUB`) | 祖先に `USB\VID_` のノードがあることが、USB 経由である証拠を兼ねるため |
-| ボリュームの ID が `STORAGE\Volume\` で始まる | `DeviceType` とエクステントの確認で、光学ドライブとフロッピーが外れるため |
+| ボリュームの devnode がドライブのインターフェイス (`GUID_DEVINTERFACE_CDROM` / `FLOPPY`) を持たない | `DeviceType` とエクステントの確認で、光学ドライブとフロッピーが外れるため |
 
 取り外しポリシーを見ないので、**登録した VID:PID と同じチップを使った内蔵機器 (ノート PC の内蔵カードリーダーなど) も抽出されます**。
 カードリーダーや USB-SATA 変換のチップ (Realtek、Genesys Logic、JMicron、ASMedia など) は多くの製品で共通なので、これらは `SERIAL` 付きで個体単位に登録してください。
@@ -177,6 +177,7 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 
 ## 実装上の注意
 
+- Microsoft はデバイス識別文字列を「解析せず比較だけに使う」よう求めています。このフローは ID から VID / PID とシリアルを切り出しているので、厳密にはこの注意に反します。解析を避ける方法は [instance-id.md](instance-id.md) の「このプロジェクトでの使い方」を参照してください。
 - インスタンス ID の比較は大文字小文字を区別しない (`_wcsicmp` / `_wcsnicmp`)。`CM_Get_Device_ID` は大文字で返ります ([findings.md](findings.md))。
 - 1 つの USB デバイスに複数のディスクやパーティションがある場合、条件を満たすレターはすべて採用されます。1 台につき 1 レターに絞るなら、USB デバイス本体の `DevInst` でまとめてください。
 - `namespace drivesel` の既存の関数のうち、`deviceId`、`interfaceDetail`、`getDeviceNumber` (`\\.\X:` にもそのまま使える)、`getU32` を流用できます。`findUsbDevice` は使いません。

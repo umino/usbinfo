@@ -436,6 +436,20 @@ static std::vector<std::wstring> listInterfaces(const GUID& g, const wchar_t* de
     return {};
 }
 
+// ボリュームのインターフェイスを持つ devnode が、光学ドライブまたはフロッピーのドライブ自身か。
+// これらはパーティションを持たず、ドライブ自身がボリュームを兼ねるので、ドライブのインターフェイスも登録している。
+// (ID が STORAGE\Volume\ で始まるかという文字列の形には頼らない)
+static bool ownsDriveInterface(const std::wstring& id)
+{
+    static std::map<std::wstring, bool> cache;
+    if (id.empty()) return false;
+    auto it = cache.find(id);
+    if (it != cache.end()) return it->second;
+    bool r = !listInterfaces(GUID_DEVINTERFACE_CDROM, id.c_str()).empty() || !listInterfaces(GUID_DEVINTERFACE_FLOPPY, id.c_str()).empty();
+    cache[id] = r;
+    return r;
+}
+
 static std::wstring interfaceInstanceId(const std::wstring& ifPath)
 {
     wchar_t buf[MAX_DEVICE_ID_LEN + 1] = L"";
@@ -1392,14 +1406,14 @@ struct DiskResult {
 // 光学ドライブとフロッピーはドライブ自身がボリュームのインターフェイスを持つので、ID の一致で対応付ける。
 // フロッピーは IOCTL_STORAGE_GET_DEVICE_NUMBER が DeviceType=DISK と「フロッピーの通し番号」を返し、
 // ハードディスクの番号 (PhysicalDriveN) と衝突するため、番号では対応付けない。
-// STORAGE\Volume\... のボリュームだけを、ディスク番号でハードディスクと対応付ける。
+// それ以外 (ディスク上のボリューム) だけを、ディスク番号でハードディスクと対応付ける。
 static bool volumeBelongs(const std::wstring& ownerId, bool hasDevNum, const STORAGE_DEVICE_NUMBER& dn,
                           const std::vector<DWORD>& extentDisks, const DiskResult& r)
 {
-    if (!ownerId.empty() && !startsWithI(ownerId, L"STORAGE\\Volume\\"))
+    if (ownsDriveInterface(ownerId))
         return _wcsicmp(ownerId.c_str(), r.instanceId.c_str()) == 0;
     if (!r.hasDevNum) return false;
-    if (!ownerId.empty() && r.kind != DevKind::Disk) return false;      // STORAGE\Volume はハードディスク上のボリューム
+    if (!ownerId.empty() && r.kind != DevKind::Disk) return false;      // ドライブ自身でないボリュームはハードディスク上のもの
     if (r.kind == DevKind::Floppy) return false;                         // 持ち主が不明なボリュームは番号が衝突しうる
     if (hasDevNum && dn.DeviceType == r.deviceType && dn.DeviceNumber == r.deviceNumber) return true;
     if (r.kind == DevKind::Disk) for (DWORD n : extentDisks) if (n == r.deviceNumber) return true;
@@ -1739,7 +1753,8 @@ static std::vector<DriveEntry> SelectDrivesLegacy(std::vector<LegacyTrace>* trac
 //   1. A:〜Z: の全ドライブについてボリューム GUID を控える (GetDriveType では絞らない)
 //   2. GUID_DEVINTERFACE_DISK を列挙し、ディスク番号 → ディスクの devnode の表を作る
 //   3. GUID_DEVINTERFACE_VOLUME を列挙し、ドライブレターを持つボリュームについて
-//      a. devnode の ID が STORAGE\Volume\ で始まる (= ディスク上のボリューム。光学ドライブ・フロッピーは除外)
+//      a. devnode が GUID_DEVINTERFACE_CDROM / GUID_DEVINTERFACE_FLOPPY を登録していない
+//         (= ドライブ自身がボリュームを兼ねる光学ドライブ・フロッピーではない)
 //      b. IOCTL_STORAGE_GET_DEVICE_NUMBER の DeviceType が FILE_DEVICE_DISK で、2. の表にあるディスクに対応する
 //      c. ディスクの devnode から親をたどると、親が USB ハブのノード (= USB デバイス本体) がある
 //      d. ディスクの devnode の取り外しポリシーが ExpectNoRemoval 以外
@@ -1765,14 +1780,27 @@ static bool getU32(DEVINST di, const DEVPROPKEY& key, DWORD& out)
     return CM_Get_DevNode_PropertyW(di, &key, &type, (PBYTE)&out, &size, 0) == CR_SUCCESS && type == DEVPROP_TYPE_UINT32;
 }
 
-static bool isUsbHubNode(DEVINST di)
+// devnode (ID で指定) が、指定したクラスのデバイスインターフェイスを有効な状態で登録しているか
+static bool hasInterface(const std::wstring& id, const GUID& g)
 {
-    std::wstring id = deviceId(di);
     ULONG len = 0;
     if (id.empty() ||
-        CM_Get_Device_Interface_List_SizeW(&len, const_cast<LPGUID>(&GUID_DEVINTERFACE_USB_HUB), const_cast<DEVINSTID_W>(id.c_str()),
+        CM_Get_Device_Interface_List_SizeW(&len, const_cast<LPGUID>(&g), const_cast<DEVINSTID_W>(id.c_str()),
                                            CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS) return false;
     return len > 1;   // インターフェイスがなくても終端の NUL 1 文字ぶんが返る
+}
+
+static bool isUsbHubNode(DEVINST di)
+{
+    return hasInterface(deviceId(di), GUID_DEVINTERFACE_USB_HUB);
+}
+
+// ボリュームのインターフェイスを持つ devnode が、光学ドライブまたはフロッピーのドライブ自身か。
+// これらはパーティションを持たず、ドライブ自身がボリュームを兼ねる。
+// ID の文字列 (STORAGE\Volume\ で始まるか) ではなく、ドライブのインターフェイスを登録しているかで判定する。
+static bool isDriveOwnedVolume(const std::wstring& volumeDevId)
+{
+    return hasInterface(volumeDevId, GUID_DEVINTERFACE_CDROM) || hasInterface(volumeDevId, GUID_DEVINTERFACE_FLOPPY);
 }
 
 // 親をたどり、親が USB ハブであるノード (USB デバイス本体) を返す。なければ 0
@@ -1842,7 +1870,7 @@ static std::vector<DriveEntry> SelectDrivesNew(bool excludeInternalUsb = false, 
         if (indexes.empty()) { finish(L"no drive letter"); continue; }
         // 光学ドライブやフロッピーのボリュームは、ドライブ自身の devnode がインターフェイスを持つ。
         // フロッピーは DeviceType が FILE_DEVICE_DISK で番号がハードディスクと衝突するので、番号で探す前に除外する。
-        if (_wcsnicmp(t.instanceId.c_str(), L"STORAGE\\Volume\\", 15) != 0) { finish(L"not a disk volume (optical/floppy)"); continue; }
+        if (isDriveOwnedVolume(t.instanceId)) { finish(L"not a disk volume (optical/floppy)"); continue; }
         t.hasDeviceNumber = getDeviceNumber(path, t.deviceNumber);
         if (!t.hasDeviceNumber) { finish(L"IOCTL_STORAGE_GET_DEVICE_NUMBER failed (spanned volume?)"); continue; }
         if (t.deviceNumber.DeviceType != FILE_DEVICE_DISK) { finish(L"not FILE_DEVICE_DISK"); continue; }

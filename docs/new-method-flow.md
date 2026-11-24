@@ -25,7 +25,7 @@ VID:PID で機器を指定するのではなく、**USB 経由で接続された
 
 | 段 | 何を決めるか | 使う値 |
 |---|---|---|
-| ディスクのボリュームか | 光学ドライブ・フロッピーを外す | ボリュームの ID の形、`IOCTL_STORAGE_GET_DEVICE_NUMBER` の `DeviceType` |
+| ディスクのボリュームか | 光学ドライブ・フロッピーを外す | ボリュームの devnode がドライブのインターフェイスを持つか、`IOCTL_STORAGE_GET_DEVICE_NUMBER` の `DeviceType` |
 | USB 経由か | 内蔵 SSD などを外す | ディスクから親をたどって USB ハブに着くか |
 | 取り外し可能か | 内蔵の USB 接続ストレージを外す | ディスクの `DEVPKEY_Device_RemovalPolicy` |
 | (任意) 内蔵の USB 機器でないか | 同上をさらに絞る | USB デバイス本体の `CM_DEVCAP_REMOVABLE` |
@@ -57,15 +57,23 @@ VID:PID で機器を指定するのではなく、**USB 経由で接続された
 | `SetupDiGetClassDevsW` | `&GUID_DEVINTERFACE_VOLUME`, `nullptr`, `nullptr`, `DIGCF_PRESENT \| DIGCF_DEVICEINTERFACE` | |
 | `SetupDiEnumDeviceInterfaces` / `SetupDiGetDeviceInterfaceDetailW` | 2. と同じ | `DevicePath` とボリュームの `DevInst` (= `DriveEntry.devInst`) を得る |
 | `GetVolumeNameForVolumeMountPointW` | `DevicePath + L"\\"` | 1. の表と GUID を `_wcsicmp` で比べる。一致するレターがなければ対象外 |
-| `CM_Get_Device_IDW` | ボリュームの `DevInst` | ID が `STORAGE\Volume\` で始まらなければ対象外 (`_wcsnicmp`)。**光学ドライブとフロッピーはここで外れる** |
+| `CM_Get_Device_IDW` | ボリュームの `DevInst` | ボリュームの devnode の ID を得る |
+| `CM_Get_Device_Interface_List_SizeW` | `&GUID_DEVINTERFACE_CDROM`、`&GUID_DEVINTERFACE_FLOPPY` のそれぞれ, ボリュームの devnode の ID, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | どちらかで返った長さが 1 より大きければ対象外 (ボリュームの devnode がドライブ自身)。**光学ドライブとフロッピーはここで外れる** |
 | `CreateFileW` + `DeviceIoControl` | `DevicePath` に `IOCTL_STORAGE_GET_DEVICE_NUMBER` | 失敗したら対象外 (複数ディスクにまたがるボリューム)。`DeviceType != FILE_DEVICE_DISK` なら対象外 |
 | (表引き) | `DeviceNumber` で 2. の表を引く | 見つからなければ対象外 |
 
 ボリュームの devnode (`STORAGE\Volume\...`) の親はボリュームマネージャー (`ROOT\volmgr\0000`) で、親をたどっても USB 機器には着きません。そのため、ディスク番号でディスクに対応付けてから、ディスク側で親をたどります。
 
-`STORAGE\Volume\` の確認を番号の表引きより先に行うのは、フロッピーを除外するためです。
+ドライブ自身かどうかの確認を番号の表引きより先に行うのは、フロッピーを除外するためです。
 フロッピーのボリュームに `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行すると、`DeviceType` が `FILE_DEVICE_DISK`、`DeviceNumber` がフロッピーの通し番号 (`Floppy0` なら 0) になり、`PhysicalDrive0` と区別できません ([README](../README.md) の「volumeInterfaces[] の各項目」を参照)。
-光学ドライブとフロッピーのボリュームは、インターフェイスを持つ devnode がドライブ自身 (`USBSTOR\CdRom&...`、`USBSTOR\SFloppy&...` など) なので、ID の形で外れます。
+
+この確認の根拠は次のとおりです。
+
+- ボリュームのインターフェイス (`GUID_DEVINTERFACE_VOLUME`) は、マウントマネージャーにボリュームの存在を知らせるためのもので、ボリュームを扱うドライバー (通常はクラスドライバー) が登録する ([Supporting Mount Manager Requests in a Storage Class Driver](https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/supporting-mount-manager-requests-in-a-storage-class-driver))。
+- 光学ドライブとフロッピーはパーティションを持たないので、クラスドライバーがドライブ自身の devnode にボリュームのインターフェイスを登録する。同じ devnode には、クラスドライバーが登録するドライブのインターフェイス ([GUID_DEVINTERFACE_CDROM](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-cdrom)、[GUID_DEVINTERFACE_FLOPPY](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-floppy)) もある。
+- ディスクのボリュームは、ボリュームマネージャーがパーティションごとに作る別の devnode に登録されるので、ドライブのインターフェイスを持たない。
+
+以前は ID が `STORAGE\Volume\` で始まるかで判定していましたが、この形は Microsoft が公開している仕様ではなく、観察した結果でしかないため改めました ([instance-id.md](instance-id.md) を参照)。
 
 ### 4. ディスクから USB デバイス本体を探す
 
@@ -128,11 +136,11 @@ ACPI の記述 (`_UPC`、`_PLD`) に依存するため、記述が不正確な�
 | USB メモリ (BOT) | すべて通る | **採用** | 実機で確認 |
 | USB-SATA 変換の SSD (BOT、`DRIVE_FIXED`) | すべて通る | **採用** | 実機で確認 |
 | USB の SSD (UAS、ID が `SCSI\Disk&...`) | すべて通る | **採用** | 判定値は確認。ドライブレターのある状態では未確認 |
-| USB の光学ドライブ | 3. ボリュームの ID がドライブ自身 | 対象外 | `verdict` で確認。メディアありは未確認 |
-| ELECOM 暗号化 USB の仮想 CD-ROM | 3. ボリュームの ID が `USBSTOR\CdRom&...` | 対象外 | 想定 (未確認) |
+| USB の光学ドライブ | 3. ボリュームの devnode がドライブ自身 (`GUID_DEVINTERFACE_CDROM` を持つ) | 対象外 | `verdict` で確認。メディアありは未確認 |
+| ELECOM 暗号化 USB の仮想 CD-ROM | 3. ボリュームの devnode がドライブ自身 (`GUID_DEVINTERFACE_CDROM` を持つ) | 対象外 | 想定 (未確認) |
 | ELECOM 暗号化 USB の暗号化領域 (ロック解除後) | すべて通る | **採用** | 想定 (未確認) |
 | ELECOM 暗号化 USB の暗号化領域 (ロック解除前) | メディアなしのディスクとしてレターが付く製品では、5. まで通る | 採用されうる (空のドライブ) | 想定 (未確認) |
-| USB フロッピー | 3. ボリュームの ID がドライブ自身 | 対象外 | 未確認 |
+| USB フロッピー | 3. ボリュームの devnode がドライブ自身 (`GUID_DEVINTERFACE_FLOPPY` を持つ) | 対象外 | 未確認 |
 | ノート PC の内蔵カードリーダー (USB 接続) | 5. または 6. | 機種による | 未確認 |
 | SD ホストコントローラー接続のカードリーダー、eSATA | 4. USB ハブに着かない | 対象外 | 未確認 |
 
@@ -142,7 +150,7 @@ ACPI の記述 (`_UPC`、`_PLD`) に依存するため、記述が不正確な�
 |---|---|---|
 | `GetDriveType == DRIVE_REMOVABLE` | 必須 | 使わない |
 | USB 経由かの判定 | ボリュームの ID が `USBSTOR#` を含む、または親の ID が `USBSTOR\` を含む | ディスクから親をたどり USB ハブに着く |
-| 光学ドライブの除外 | `GetDriveType` が `DRIVE_CDROM` になるので外れる | ボリュームの ID の形と `DeviceType` |
+| 光学ドライブの除外 | `GetDriveType` が `DRIVE_CDROM` になるので外れる | ボリュームの devnode がドライブのインターフェイスを持つか、`DeviceType` |
 | 取り外し可能かの判定 | `GetDriveType` (メディアが抜けるか) | ディスクの取り外しポリシー |
 
 この結果、USB の HDD/SSD (`DRIVE_FIXED`) と UAS 接続の機器が新たに抽出されます。実機での比較は [findings.md](findings.md) の「既存方式と新方式の比較」にあります。
@@ -151,7 +159,7 @@ ACPI の記述 (`_UPC`、`_PLD`) に依存するため、記述が不正確な�
 
 | 箇所 | 依存しているもの | 変わったときの影響 |
 |---|---|---|
-| 3. ボリュームの ID が `STORAGE\Volume\` で始まる | ボリュームマネージャーが作る devnode の ID の形 | 形が変わると、ディスクのボリュームがすべて外れる |
+| 3. ボリュームの devnode がドライブのインターフェイスを持たない | 光学ドライブ・フロッピーのクラスドライバーが、ボリュームとドライブの両方のインターフェイスを同じ devnode に登録すること | 別の devnode に分かれると、光学ドライブ・フロッピーが 3. で外れず、番号の表引きに進む。光学ドライブは `DeviceType` で外れるが、フロッピーは番号の衝突で誤って対応付くおそれがある |
 | 4. 親が USB ハブ | ハブのドライバーが `GUID_DEVINTERFACE_USB_HUB` を登録していること | 登録しないハブドライバーの配下では、USB 機器がすべて外れる |
 | 5. 取り外しポリシー | ストレージドライバーと ACPI の記述 | 外付け機器が `ExpectNoRemoval` と報告されると外れる。内蔵機器が `ExpectSurpriseRemoval` と報告されると入る |
 | 6. `CM_DEVCAP_REMOVABLE` | ACPI の記述 (`_UPC`、`_PLD`) | 5. と同じ |

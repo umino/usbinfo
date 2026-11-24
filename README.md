@@ -358,8 +358,10 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 `STORAGE\Volume\...` の devnode の親をたどると、ボリュームマネージャー (`ROOT\volmgr\0000`) に行き着き、USB デバイスには届きません。
 そのため、このツールは次のようにボリュームとドライブを対応付けています。
 
-- **`STORAGE\Volume\...` のボリューム**: ボリュームを開いて `IOCTL_STORAGE_GET_DEVICE_NUMBER` でディスク番号を得て、`GUID_DEVINTERFACE_DISK` のディスクと番号で対応付ける。
-- **それ以外 (光学ドライブ、フロッピー)**: インターフェイスを持つ devnode がドライブ自身なので、インスタンス ID の一致で対応付ける。
+- **光学ドライブ、フロッピーのボリューム**: インターフェイスを持つ devnode が、それ自身で `GUID_DEVINTERFACE_CDROM` か `GUID_DEVINTERFACE_FLOPPY` も登録している (= ドライブ自身がボリュームを兼ねている)。インスタンス ID の一致でドライブと対応付ける。
+- **それ以外 (ディスク上のボリューム)**: ボリュームを開いて `IOCTL_STORAGE_GET_DEVICE_NUMBER` でディスク番号を得て、`GUID_DEVINTERFACE_DISK` のディスクと番号で対応付ける。
+
+どちらに当たるかは、ID の文字列 (`STORAGE\Volume\` で始まるか) ではなく、登録しているインターフェイスで判定しています。ID の形は Microsoft が公開している仕様ではないためです ([docs/instance-id.md](docs/instance-id.md) を参照)。
 
 フロッピーを番号で対応付けてはいけない理由は、フロッピーのボリュームに `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行すると、`DeviceType` が `FILE_DEVICE_DISK`、`DeviceNumber` がフロッピーの通し番号 (`\Device\Floppy0` なら 0) になるためです。
 この番号はハードディスクの番号 (`PhysicalDrive0`) と区別がつかず、種類と番号だけで探すと `PhysicalDrive0` のディスクに誤って対応付けられます。
@@ -379,7 +381,7 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 新方式の条件:
 
 1. ドライブレターを持つボリュームである (`GetDriveType` では絞らない)。
-2. ボリュームの devnode の ID が `STORAGE\Volume\` で始まる。光学ドライブとフロッピーはここで外れる。
+2. ボリュームの devnode が `GUID_DEVINTERFACE_CDROM` / `GUID_DEVINTERFACE_FLOPPY` を登録していない (= ドライブ自身がボリュームを兼ねる光学ドライブ・フロッピーではない)。光学ドライブとフロッピーはここで外れる。
 3. ボリュームに `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行し、`DeviceType` が `FILE_DEVICE_DISK` で、同じ番号のディスク (`GUID_DEVINTERFACE_DISK`) がある。
 4. ディスクの devnode から親をたどると、親が USB ハブのノード (USB デバイス本体) がある。
 5. ディスクの devnode の取り外しポリシーが `ExpectNoRemoval` 以外である。
@@ -394,7 +396,7 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 | UAS 接続の機器 (ID が `SCSI\Disk&...`) | 抽出しない | 抽出する |
 | ノート PC の内蔵 USB カードリーダー | 抽出する | 取り外しポリシー次第。`excludeInternalUsb` で除外できる |
 
-新方式の手順 (使う API、引数、判定) は [docs/new-method-flow.md](docs/new-method-flow.md) に、VID:PID (+ シリアル) で許可する機器を指定するホワイトリスト方式の設計は [docs/whitelist-flow.md](docs/whitelist-flow.md) にまとめています。
+新方式の手順 (使う API、引数、判定) は [docs/new-method-flow.md](docs/new-method-flow.md) に、判定で見ているインスタンス ID の成り立ちは [docs/instance-id.md](docs/instance-id.md) に、VID:PID (+ シリアル) で許可する機器を指定するホワイトリスト方式の設計は [docs/whitelist-flow.md](docs/whitelist-flow.md) にまとめています。
 
 `-f letters` で両方式の結果を 1 ドライブ 1 行で比べられます。
 
@@ -422,7 +424,7 @@ C:   FIXED      -         -         same         not USB                        
 
 ボリュームを起点にする場合は、ボリュームのインターフェイスで `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行し、`DeviceType` が `FILE_DEVICE_DISK` のものだけを残してから、ディスク番号で対応付けたディスクに 2、3 の条件を適用します。
 光学ドライブは `DeviceType` が `FILE_DEVICE_CD_ROM` になるので、これで除外できます。
-ただし、フロッピーは `DeviceType` が `FILE_DEVICE_DISK` になるので、この確認では除外できません。ボリュームのインスタンス ID が `STORAGE\Volume\` で始まるものだけをディスク番号で対応付け、それ以外はインスタンス ID の devnode 自身から親をたどってください (「volumeInterfaces[] の各項目」を参照)。
+ただし、フロッピーは `DeviceType` が `FILE_DEVICE_DISK` になるので、この確認では除外できません。ボリュームの devnode が `GUID_DEVINTERFACE_CDROM` / `GUID_DEVINTERFACE_FLOPPY` を登録しているもの (ドライブ自身) は、その devnode 自身から親をたどり、それ以外だけをディスク番号で対応付けてください (「volumeInterfaces[] の各項目」を参照)。
 ボリュームを持たないディスク (未フォーマットなど) は一覧に現れません。
 
 WPD デバイスの有無 (`wpdDevice`) は判定には使わず、比較用に出力しています。WPD を判定に使う場合は次の点に注意してください。
