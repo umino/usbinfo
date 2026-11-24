@@ -2,6 +2,7 @@
 
 許可する USB 機器を VID:PID (+ シリアル番号) で列挙しておき、それに一致した機器のドライブだけを抽出する方式の設計です。
 取り外しポリシーや `GetDriveType` のような OS の申告値は使わず、VID:PID の照合と、仮想 CD-ROM を誤認識しないための最小限の確認だけで判定します。
+VID:PID とシリアル番号は、インスタンス ID の文字列から切り出すのではなく、**USB ハブに IOCTL を発行して、機器のデバイスディスクリプタと文字列ディスクリプタから直接読みます**。
 
 出力は既存方式・新方式と同じ `DriveEntry { driveIndex, devInst }` のリストとし、`namespace drivesel` に `SelectDrivesWhitelist()` として並べる想定です。
 
@@ -11,7 +12,7 @@ ELECOM の暗号化 USB メモリのように、1 台の USB デバイスが仮�
 VID:PID もシリアル番号も USB デバイス本体の値なので、2 つのドライブで同じになり、値だけでは区別できません。
 
 ```
-USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID とシリアルはここにある
+USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体 (親は USB ハブ)。VID:PID とシリアルはこの機器のディスクリプタにある
  ├ USBSTOR\CdRom&Ven_ELECOM&...\...&0   ← LUN 0: 仮想 CD-ROM   → GUID_DEVINTERFACE_CDROM を登録
  └ USBSTOR\Disk&Ven_ELECOM&...\...&1    ← LUN 1: マスストレージ → GUID_DEVINTERFACE_DISK を登録
 ```
@@ -26,7 +27,10 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 |---|---|
 | ディスクのデバイスインターフェイス (`GUID_DEVINTERFACE_DISK`) | 「ディスクか」の判定。仮想 CD-ROM を除外する |
 | ディスク番号の IOCTL (`IOCTL_STORAGE_GET_DEVICE_NUMBER` ほか) | ドライブレターとディスクの対応付け |
-| USB のデバイス ID の形 (`USB\VID_xxxx&PID_xxxx\<シリアル>`) | 「USB 経由か」と「登録した機器か」の判定 |
+| USB ハブのインターフェイス (`GUID_DEVINTERFACE_USB_HUB`) | 「USB 経由か」の判定と、USB デバイス本体の特定 |
+| USB ハブへの IOCTL (デバイスディスクリプタ、文字列ディスクリプタ) | 「登録した機器か」の判定 (VID:PID、シリアル番号) |
+
+インスタンス ID は CM API に渡す引数として使うだけで、中身を解析しません ([instance-id.md](instance-id.md) の「前提」を参照)。
 
 ## ホワイトリストの形式
 
@@ -39,13 +43,13 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 
 | フィールド | 省略時 | 照合先 |
 |---|---|---|
-| `VID:PID` | 省略不可 | ディスクに最も近い `USB\VID_vvvv&PID_pppp` で始まる祖先 |
-| `SERIAL` | 機種単位で照合 | USB デバイス本体のインスタンス ID の 3 番目の要素 (`CM_DEVCAP_UNIQUEID` が立っているときだけ) |
+| `VID:PID` | 省略不可 | USB デバイス本体のデバイスディスクリプタの `idVendor` / `idProduct` |
+| `SERIAL` | 機種単位で照合 | USB デバイス本体の文字列ディスクリプタ (`iSerialNumber` が指すもの) |
 | `lun=N` | LUN を問わない | ディスクの `SCSI_ADDRESS.Lun` |
 
 - 仮想 CD-ROM は手順 1 で外れるので、ELECOM の暗号化 USB メモリも VID:PID を 1 行書くだけで済みます。
 - `lun=` は、1 台に**ディスクが 2 つ以上**見える機器 (公開領域と暗号化領域が両方ディスクとして見える機器、複数スロットのカードリーダーなど) で、どちらかだけを許可したいときに使います。
-- `SERIAL` には、USB の文字列ディスクリプタの値ではなく、**インスタンス ID に入っている値**を登録します。ディスクリプタの値がそのままインスタンス ID になる保証はありません (使えない文字を含むシリアルの扱いは、Microsoft のドキュメントに記載がなく未確認です。[instance-id.md](instance-id.md) を参照)。登録する値は `usbinfo -f json` の `usbDevices[].devnode.instanceId` で確認できます。
+- `SERIAL` には、機器の文字列ディスクリプタの値をそのまま登録します。`usbinfo -f csv` の `usbSerial` 列 (`-f json` では `usbDevices[].usb.deviceDescriptor.serialNumberString`) で確認できます。インスタンス ID の値ではないので、Windows がシリアル番号をどう扱うか (`UniqueID`、`IgnoreHWSerNum`、使えない文字の扱い) には左右されません。
 
 ## フロー
 
@@ -64,11 +68,16 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 | `SetupDiGetClassDevsW` | `&GUID_DEVINTERFACE_DISK`, `nullptr`, `nullptr`, `DIGCF_PRESENT \| DIGCF_DEVICEINTERFACE` | ディスクだけを列挙する。**仮想 CD-ROM はここに現れない** |
 | `SetupDiEnumDeviceInterfaces` | 同じ GUID、index を 0 から増やす | `FALSE` で終了 |
 | `SetupDiGetDeviceInterfaceDetailW` | 2 段階呼び出し、`SP_DEVINFO_DATA` も受け取る | `DevicePath` とディスクの `DevInst` を得る |
-| `CM_Get_Parent` + `CM_Get_Device_IDW` | ディスクの `DevInst` から順に祖先へ | ID が `USB\VID_` で始まる**最初の**祖先を探す (`_wcsnicmp`)。ルートまで見つからなければ USB でないので対象外 |
-| (文字列の解析) | 見つかった祖先の ID | `USB\VID_vvvv&PID_pppp` の `vvvv` / `pppp` を 16 進で読む。読めなければ対象外 |
-| `CM_Get_Parent` + `CM_Get_Device_IDW` | 見つかった祖先から、さらに祖先へ | ID に `&MI_` を含まない最初のノードを USB デバイス本体とする (複合デバイス対策。単機能の機器なら見つかった祖先自身) |
-| `CM_Get_DevNode_PropertyW` | USB デバイス本体, `&DEVPKEY_Device_Capabilities` (`DEVPROP_TYPE_UINT32`) | `CM_DEVCAP_UNIQUEID` が立っていれば、ID の 3 番目の要素 (`\` で区切った最後の部分) をシリアルとする。立っていなければシリアルなし |
-| `CreateFileW` | `DevicePath`, アクセス `0`, `FILE_SHARE_READ \| FILE_SHARE_WRITE`, `OPEN_EXISTING` | アクセス 0 なので管理者権限は不要 |
+| `CM_Get_Parent` | ディスクの `DevInst` から順に親へ | ルートまでたどっても下記に当たらなければ USB でないので対象外 |
+| `CM_Get_Device_IDW` + `CM_Get_Device_Interface_List_SizeW` | 親の ID, `&GUID_DEVINTERFACE_USB_HUB`, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | 返った長さが 1 より大きければ親は USB ハブ。そのとき**子のほう**を USB デバイス本体とする (新方式の `findUsbDevice()` と同じ) |
+| `CM_Get_Device_Interface_ListW` | `&GUID_DEVINTERFACE_USB_HUB`, ハブの ID, `CM_GET_DEVICE_INTERFACE_LIST_PRESENT` | ハブのインターフェイスパスを得る |
+| `CM_Get_DevNode_PropertyW` | USB デバイス本体, `&DEVPKEY_Device_Address` | ハブ上のポート番号を得る。取得できない、または 0 なら対象外 |
+| `CreateFileW` | ハブのインターフェイスパス, `GENERIC_WRITE`, `FILE_SHARE_WRITE`, `OPEN_EXISTING` | 開けなければ対象外。usbinfo と同じ開き方で、管理者権限は不要 |
+| `DeviceIoControl` | `IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX` → `USB_NODE_CONNECTION_INFORMATION_EX` (`ConnectionIndex` = ポート番号) | 失敗した、または `ConnectionStatus != DeviceConnected` なら対象外。`DeviceDescriptor.idVendor` / `idProduct` / `iSerialNumber` を得る |
+| `DeviceIoControl` | `IOCTL_USB_GET_NODE_CONNECTION_DRIVERKEY_NAME` → `USB_NODE_CONNECTION_DRIVERKEY_NAME` (`ConnectionIndex` = ポート番号) | 返った `DriverKeyName` が USB デバイス本体の `DEVPKEY_Device_Driver` と `_wcsicmp` で一致しなければ対象外 (別のポートの機器を読んでいないことの確認) |
+| `DeviceIoControl` | `IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION` (`ConnectionIndex` = ポート番号, `SetupPacket.wValue = (USB_STRING_DESCRIPTOR_TYPE << 8) \| 0`, `wIndex = 0`, `wLength = 255`) | `SERIAL` 付きのエントリがあり、`iSerialNumber` が 0 でないときだけ。対応言語 ID の一覧を読み、先頭の言語 ID を使う。読めなければ `0x0409` |
+| `DeviceIoControl` | `IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION` (`wValue = (USB_STRING_DESCRIPTOR_TYPE << 8) \| iSerialNumber`, `wIndex` = 言語 ID, `wLength = 255`) | 返った `USB_STRING_DESCRIPTOR` の `bString` (UTF-16、長さは `bLength - 2` バイト) をシリアル番号とする。失敗したらシリアル番号不明 |
+| `CreateFileW` | ディスクの `DevicePath`, アクセス `0`, `FILE_SHARE_READ \| FILE_SHARE_WRITE`, `OPEN_EXISTING` | アクセス 0 なので管理者権限は不要 |
 | `DeviceIoControl` | `IOCTL_SCSI_GET_ADDRESS` → `SCSI_ADDRESS` | ホワイトリストに `lun=` があるときだけ必要。失敗したら LUN 不明 (-1) |
 | (照合) | ホワイトリストの各エントリ | 下記の 3 条件をすべて満たすエントリが 1 つでもあれば許可 |
 | `DeviceIoControl` | `IOCTL_STORAGE_GET_DEVICE_NUMBER` → `STORAGE_DEVICE_NUMBER` | 許可したディスクの `DeviceNumber` を集合に入れる。`DeviceType != FILE_DEVICE_DISK` または失敗なら入れない |
@@ -76,15 +85,17 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 エントリと一致する条件:
 
 1. VID と PID が一致する。
-2. エントリに `SERIAL` があるとき: 機器にシリアルがあり、`_wcsicmp` で一致する。**シリアルのない機器は、`SERIAL` 付きのエントリには一致させない。**
+2. エントリに `SERIAL` があるとき: 機器のシリアル番号を読めて、完全に一致する (`wcscmp`)。**`iSerialNumber` が 0 の機器と、読み取りに失敗した機器は、`SERIAL` 付きのエントリには一致させない。**
 3. エントリに `lun=` があるとき: `Lun` が一致する。LUN 不明なら一致させない。
 
 補足:
 
-- 「最初の」祖先を使うのは、ハブ経由で接続されたときに、上流の USB ハブ (これも `USB\VID_...` の ID を持つ) と取り違えないためです。
-- BOT (`USBSTOR\Disk&...`)、UAS (`SCSI\Disk&...`)、ハブ経由のいずれでも、ディスクから祖先をたどると USB デバイス本体 (`USB\VID_...`) に着くことは、新方式の調査で確認しています ([findings.md](findings.md))。
-- 複合デバイスでは、最初に見つかる祖先は `USB\VID_vvvv&PID_pppp&MI_00\...` (インターフェイスのノード) です。VID / PID はここから読めますが、3 番目の要素は Windows が作った値なので、シリアルはその上のデバイス本体から取ります。
-- `CM_DEVCAP_UNIQUEID` が立っていない機器の 3 番目の要素は、`5&2c3a1b&0&3` のような、接続ポートから作られた値です。シリアルとして比べると、同じポートにつないだ別の個体と一致しうるので使いません。Windows の設定 (`usbflags` の `IgnoreHWSerNum`) でシリアルを無視するよう指定された機器も同じ扱いになります。
+- 親が USB ハブであることで USB デバイス本体を見分けるので、ハブ経由の接続でも上流のハブと取り違えません。複合デバイスでも、止まるのは `&MI_xx` のインターフェイスのノードではなく、ハブ直下のデバイス本体です。
+- BOT (`USBSTOR\Disk&...`)、UAS (`SCSI\Disk&...`)、ハブ経由のいずれでも、ディスクから親をたどると USB ハブ直下の USB デバイス本体に着くことは、新方式の調査で確認しています ([findings.md](findings.md))。
+- USB デバイスの `DEVPKEY_Device_Address` がハブのポート番号であることは、`DEVICE_CAPABILITIES.Address` の説明に記載があります ([DEVICE_CAPABILITIES](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_device_capabilities): "USB: The port number")。ドライバーキー名の照合は、その対応が正しいことの念のための確認です。usbinfo では `connection.driverKeyMatchesDevnode` で同じ確認をしています。
+- 3 つの IOCTL は、いずれも USB ハブ (`GUID_DEVINTERFACE_USB_HUB`) に発行するユーザーモード向けの要求です ([IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ni-usbioctl-ioctl_usb_get_node_connection_information_ex)、[IOCTL_USB_GET_NODE_CONNECTION_DRIVERKEY_NAME](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ni-usbioctl-ioctl_usb_get_node_connection_driverkey_name)、[IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/usbioctl/ni-usbioctl-ioctl_usb_get_descriptor_from_node_connection))。
+- 文字列ディスクリプタの読み取りは機器との通信を伴うので、機器がサスペンド中などで失敗することがあります (usbinfo では `(read failed)` と表示)。失敗したときは `SERIAL` 付きのエントリに一致させないので、誤って抽出する方向には倒れません。機種単位のエントリ (`SERIAL` なし) の照合には影響しません。
+- インスタンス ID からシリアル番号を切り出す方式と違い、`CM_DEVCAP_UNIQUEID` が立っていない機器や、`IgnoreHWSerNum` が設定された機器でも、機器が持つシリアル番号で照合できます。
 
 ### 2. ドライブレターごとに、許可したディスクのものか確かめる
 
@@ -145,7 +156,7 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 | 仮想 CD-ROM がディスクとして列挙されないか | `disks[]` の ELECOM の行 | 仮想 CD-ROM の `kind` が `CdRom` |
 | ロック解除の前後で VID:PID が変わらないか | `-f lsusb` を解除の前後で比べる | 同じ。変わる製品では、ロック解除後の PID を登録する |
 | ロック解除前に暗号化領域がどう見えるか | 解除前の `disks[]` と `volumeInterfaces[]` | ディスクが 2 つ見えるなら、`storage.scsiAddress` の LUN で `lun=` を検討する |
-| シリアルを持つか | `usbDevices[].devnode.capUniqueID` | `false` なら個体単位の登録はできない |
+| シリアルを持つか、読めるか | `-f csv` の `usbSerial` | `(none)` なら個体単位の登録はできない。`(read failed)` なら接続し直して再確認する |
 | フロッピーが 2. で外れるか | USB フロッピーをつないだときの `volumeInterfaces[]` | `extentDiskNumbers` が空 |
 
 フロッピーの確認ができない場合でも、誤って一致するのは、フロッピーの番号と同じ番号のディスク (`Floppy0` なら `PhysicalDrive0`、通常はシステムディスク) が登録済みの USB 機器だったときだけです。
@@ -167,7 +178,6 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 |---|---|
 | ディスクの取り外しポリシーが `ExpectNoRemoval` 以外 | 許可するかは VID:PID で決めるため |
 | USB デバイスに `CM_DEVCAP_REMOVABLE` が立っている | 同上 |
-| 親が USB ハブであること (`GUID_DEVINTERFACE_USB_HUB`) | 祖先に `USB\VID_` のノードがあることが、USB 経由である証拠を兼ねるため |
 | ボリュームの devnode がドライブのインターフェイス (`GUID_DEVINTERFACE_CDROM` / `FLOPPY`) を持たない | `DeviceType` とエクステントの確認で、光学ドライブとフロッピーが外れるため |
 
 取り外しポリシーを見ないので、**登録した VID:PID と同じチップを使った内蔵機器 (ノート PC の内蔵カードリーダーなど) も抽出されます**。
@@ -177,8 +187,8 @@ USB\VID_056E&PID_xxxx\<シリアル>        ← USB デバイス本体。VID:PID
 
 ## 実装上の注意
 
-- Microsoft はデバイス識別文字列を「解析せず比較だけに使う」よう求めています。このフローは ID から VID / PID とシリアルを切り出しているので、厳密にはこの注意に反します。解析を避ける方法は [instance-id.md](instance-id.md) の「このプロジェクトでの使い方」を参照してください。
-- インスタンス ID の比較は大文字小文字を区別しない (`_wcsicmp` / `_wcsnicmp`)。`CM_Get_Device_ID` は大文字で返ります ([findings.md](findings.md))。
+- インスタンス ID は、CM API に渡す引数と、ドライバーキー名の比較 (`_wcsicmp`) にだけ使い、中身は解析しません。
 - 1 つの USB デバイスに複数のディスクやパーティションがある場合、条件を満たすレターはすべて採用されます。1 台につき 1 レターに絞るなら、USB デバイス本体の `DevInst` でまとめてください。
-- `namespace drivesel` の既存の関数のうち、`deviceId`、`interfaceDetail`、`getDeviceNumber` (`\\.\X:` にもそのまま使える)、`getU32` を流用できます。`findUsbDevice` は使いません。
-- 新たに必要なのは、ホワイトリストの読み込み、祖先の ID からの VID / PID / シリアルの切り出し、`IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`、`IOCTL_SCSI_GET_ADDRESS` の 4 つです。
+- `namespace drivesel` の既存の関数のうち、`deviceId`、`interfaceDetail`、`getDeviceNumber` (`\\.\X:` にもそのまま使える)、`getU32`、`findUsbDevice` を流用できます。
+- ハブへの IOCTL は、usbinfo 本体の `usbGetDescriptor()` / `usbGetString()` と、USB デバイスの情報を集める処理 (ポート番号の取得からドライバーキー名の照合まで) に実装例があります。`namespace drivesel` に移すときは、これらを持ち込みます。
+- 新たに必要なのは、ホワイトリストの読み込み、ハブへの 3 つの IOCTL、`IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`、`IOCTL_SCSI_GET_ADDRESS` です。

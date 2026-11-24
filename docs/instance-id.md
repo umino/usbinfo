@@ -172,15 +172,12 @@ usbinfo はこの一致を使って WPD デバイスとボリュームを対応�
 |---|---|---|
 | 新方式: USB 経由かの判定 | なし (親が `GUID_DEVINTERFACE_USB_HUB` を登録しているか) | ドキュメント ([GUID_DEVINTERFACE_USB_HUB](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/guid-devinterface-usb-hub)) |
 | 新方式: 光学ドライブ・フロッピーの除外 | なし (ボリュームの devnode が `GUID_DEVINTERFACE_CDROM` / `FLOPPY` を登録しているか) | ドキュメントと観察 (前節) |
-| ホワイトリスト方式: VID / PID | `USB\VID_vvvv&PID_pppp` を ID から切り出す | 形はドキュメントにある。ただし ID の解析自体はドキュメントで非推奨 |
-| ホワイトリスト方式: シリアル番号 | デバイスインスタンス ID の 3 番目の要素 | インスタンス ID にシリアル番号の情報が入ること、`UniqueID` の意味はドキュメントにある。USB でディスクリプタの文字列がそのまま入ることは観察のみ |
+| ホワイトリスト方式: USB デバイス本体の特定 | なし (親が `GUID_DEVINTERFACE_USB_HUB` を登録しているか) | ドキュメント |
+| ホワイトリスト方式: VID / PID、シリアル番号 | なし (ハブへの IOCTL で機器のディスクリプタを直接読む) | ドキュメント ([whitelist-flow.md](whitelist-flow.md) を参照) |
 | 既存方式: USB 経由かの判定 | ボリュームの ID に `USBSTOR#` を含む | 観察のみ (ボリュームの ID の形はドキュメントに記載なし) |
 | usbinfo: WPD とボリュームの対応付け | `SWD\WPDBUSENUM\` の後ろがボリュームの ID と同じ | 観察のみ |
 
-ホワイトリスト方式で ID の解析を避けたい場合は、次の方法があります (いずれも未実装)。
-
-- **VID / PID**: ID を切り出さず、ホワイトリストの値から `USB\VID_vvvv&PID_pppp` という文字列を組み立て、USB デバイス本体のハードウェア ID (`DEVPKEY_Device_HardwareIds`) のどれかと文字列として比較する。
-- **シリアル番号**: USB ハブに `IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION` を発行し、文字列ディスクリプタを直接読む (usbinfo の `usbSerial` と同じ方法)。
+ホワイトリスト方式は、以前は ID から `USB\VID_vvvv&PID_pppp` とシリアル番号を切り出す設計でしたが、上の「解析しない」という注意に合わせて、ハブへの IOCTL でディスクリプタを直接読む設計に変えました。
 
 ## 参照したドキュメント
 
