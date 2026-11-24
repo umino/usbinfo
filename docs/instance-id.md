@@ -176,6 +176,10 @@ usbinfo はこの一致を使って WPD デバイスとボリュームを対応�
 | ホワイトリスト方式: VID / PID、シリアル番号 | なし (ハブへの IOCTL で機器のディスクリプタを直接読む) | ドキュメント ([whitelist-flow.md](whitelist-flow.md) を参照) |
 | 既存方式: USB 経由かの判定 | ボリュームの ID に `USBSTOR#` を含む | 観察のみ (ボリュームの ID の形はドキュメントに記載なし) |
 | usbinfo: WPD とボリュームの対応付け | `SWD\WPDBUSENUM\` の後ろがボリュームの ID と同じ | 観察のみ |
+| usbinfo: `usbStorageDriverService`、`-f code` のディスクの種類 | なし (`DEVPKEY_Device_EnumeratorName` で列挙子を読む) | ドキュメント ([Hardware ID](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/hardware-ids) の `<enumerator>\...`) |
+| usbinfo: `-f code --vidpid` | なし (ハブから読んだデバイスディスクリプタ) | ドキュメント |
+| usbinfo: `-f code` のボリューム ID の形 | ボリュームの ID の先頭 | 観察のみ。ID の形を調べるための表示なので、解析が目的 |
+| usbinfo: `-f lsusb` の VID:PID | ハブから読めないときだけ、インスタンス ID から補う。ルートハブはハードウェア ID から切り出す | 形はドキュメントにある。表示のみ |
 
 ホワイトリスト方式は、以前は ID から `USB\VID_vvvv&PID_pppp` とシリアル番号を切り出す設計でしたが、上の「解析しない」という注意に合わせて、ハブへの IOCTL でディスクリプタを直接読む設計に変えました。
 

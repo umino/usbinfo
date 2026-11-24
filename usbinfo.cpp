@@ -1547,8 +1547,14 @@ static DiskResult processDisk(const std::wstring& ifPath, DevKind kind, const Op
         else { Node tmp; usbInfo(chain[usbIdx], tmp, usb); usbCache[usbId] = usb; }
         addUsbBrief(d.obj(L"usb"), usb);
         // ディスクに最も近い USB 列挙ノードのサービス = 実際に使われているストレージドライバ (USBSTOR / UASPStor など)
-        for (int i = 1; i <= usbIdx; ++i)
-            if (startsWithI(devInstId(chain[i]), L"USB\\")) { getStrProp(chain[i], DEVPKEY_Device_Service, storageDriver); break; }
+        // 列挙子は ID の先頭を切り出さず、DEVPKEY_Device_EnumeratorName で調べる
+        for (int i = 1; i <= usbIdx; ++i) {
+            std::wstring en;
+            if (getStrProp(chain[i], DEVPKEY_Device_EnumeratorName, en) && _wcsicmp(en.c_str(), L"USB") == 0) {
+                getStrProp(chain[i], DEVPKEY_Device_Service, storageDriver);
+                break;
+            }
+        }
         d.str(L"usbStorageDriverService", storageDriver);
     }
 
@@ -1966,9 +1972,19 @@ static void compareDriveSelection(Node& arr, bool excludeInternalUsb)
             if (n->diskDevInst) {
                 no.str(L"diskName", n->diskName);
                 no.str(L"diskInstanceId", n->diskInstanceId);
+                std::wstring en;
+                no.str(L"diskEnumerator", getStrProp(n->diskDevInst, DEVPKEY_Device_EnumeratorName, en) ? en : L"?");
                 no.str(L"diskRemovalPolicy", n->removalPolicy < 0 ? L"?" : removalPolicyName((DWORD)n->removalPolicy));
                 no.str(L"usbDeviceInstanceId", n->usbInstanceId.empty() ? L"(none)" : n->usbInstanceId);
                 if (!n->usbInstanceId.empty()) {
+                    // VID:PID は ID から切り出さず、ハブ経由でデバイスディスクリプタを読む
+                    DEVINST usb = 0;
+                    UsbBrief b;
+                    if (CM_Locate_DevNodeW(&usb, const_cast<DEVINSTID_W>(n->usbInstanceId.c_str()), CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS) {
+                        Node tmp;
+                        usbInfo(usb, tmp, b);
+                    }
+                    no.str(L"usbVidPid", b.valid ? fmt(L"%04X:%04X", b.vid, b.pid) : L"?");
                     no.str(L"usbCapRemovable", tri(n->usbCapRemovable));
                     no.str(L"usbInLocalMachineContainer", tri(n->usbInLocalMachineContainer));
                 }
@@ -2235,8 +2251,8 @@ static std::wstring codeReport(const Node& arr, bool withVidPid)
 
         std::wstring dt = val(&r, L"driveType");
         wchar_t type = dt == L"REMOVABLE" ? L'R' : dt == L"FIXED" ? L'F' : dt == L"CDROM" ? L'C' : dt == L"REMOTE" ? L'W' : dt == L"RAMDISK" ? L'M' : L'U';
-        std::wstring diskId = val(d, L"diskInstanceId");
-        wchar_t disk = diskId.empty() ? L'-' : startsWithI(diskId, L"USBSTOR\\") ? L'U' : startsWithI(diskId, L"SCSI\\") ? L'S' : L'O';
+        std::wstring diskId = val(d, L"diskInstanceId"), diskEnum = val(d, L"diskEnumerator");
+        wchar_t disk = diskId.empty() ? L'-' : _wcsicmp(diskEnum.c_str(), L"USBSTOR") == 0 ? L'U' : _wcsicmp(diskEnum.c_str(), L"SCSI") == 0 ? L'S' : L'O';
         std::wstring pol = val(d, L"diskRemovalPolicy");
         wchar_t policy = pol == L"ExpectNoRemoval" ? L'N' : pol == L"ExpectOrderlyRemoval" ? L'O' : pol == L"ExpectSurpriseRemoval" ? L'S' : L'-';
 
@@ -2246,10 +2262,8 @@ static std::wstring codeReport(const Node& arr, bool withVidPid)
                                 codeBool(l, L"idHasUsbstorHash"), codeBool(l, L"parentHasUsbstor"),
                                 policy, codeBool(d, L"usbCapRemovable"), codeBool(d, L"usbInLocalMachineContainer"));
         if (withVidPid) {
-            USHORT vid = 0, pid = 0;
-            std::wstring usb = val(d, L"usbDeviceInstanceId");
-            if (parseIdAfter(usb, L"VID", vid) && parseIdAfter(usb, L"PID", pid)) line += fmt(L" %04X:%04X", vid, pid);
-            else line += L" ----:----";
+            std::wstring vp = val(d, L"usbVidPid");
+            line += vp.size() == 9 ? L" " + vp : L" ----:----";
         }
         o += seal(line);
     }

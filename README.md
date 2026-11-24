@@ -244,7 +244,7 @@ Linux の `lsusb` との違い:
 ### usb / usbStorageDriverService
 
 USB 経由のディスクにだけ出力されます。`usb` は対応する USB デバイスの要約で、項目の意味は次節と同じです。
-`usbStorageDriverService` はディスクに最も近い USB 列挙ノードのサービス名で、転送方式の判別に使えます。
+`usbStorageDriverService` はディスクに最も近い USB 列挙ノード (列挙子 `DEVPKEY_Device_EnumeratorName` が `USB` のノード) のサービス名で、転送方式の判別に使えます。
 
 ### wmi
 
@@ -412,7 +412,7 @@ C:   FIXED      -         -         same         not USB                        
 | `New: result` | 新方式で抽出した、または除外した理由 |
 | `Disk` | ボリュームが載っているディスクの名前 |
 
-`-f json` / `-f text` の `driveLetters[]` には、`legacyDetail` (既存方式が見ている各チェックの結果) と `newDetail` (ディスク番号、ディスクと USB デバイス本体のインスタンス ID、取り外しポリシー、`capRemovable`、`inLocalMachineContainer`) も出力します。
+`-f json` / `-f text` の `driveLetters[]` には、`legacyDetail` (既存方式が見ている各チェックの結果) と `newDetail` (ディスク番号、ディスクと USB デバイス本体のインスタンス ID、ディスクの列挙子 (`diskEnumerator`)、ハブから読んだ VID:PID (`usbVidPid`)、取り外しポリシー、`capRemovable`、`inLocalMachineContainer`) も出力します。
 
 ## 判定方法について
 
