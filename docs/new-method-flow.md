@@ -99,6 +99,57 @@ USB デバイス本体ではなく、ディスクの devnode の値を見ます�
 内蔵 NVMe は `ExpectNoRemoval`、調べた USB 機器はすべて `ExpectSurpriseRemoval` でした ([findings.md](findings.md))。
 ノート PC の内蔵カードリーダーのような、USB 接続だが内蔵の機器を、ここで外せることを期待しています (未確認)。
 
+#### 取り外しポリシーを使う根拠
+
+**`RemovableMedia` とは答えている問いが違う。**
+判定したいのは「機器ごと PC から外せるか」です。
+
+| 値 | 意味 (Microsoft の記述) | 誰が決めるか |
+|---|---|---|
+| `STORAGE_DEVICE_DESCRIPTOR.RemovableMedia` | "the device's **media** (if any) is removable" ([STORAGE_DEVICE_DESCRIPTOR](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_device_descriptor)) | 機器のファームウェア (SCSI INQUIRY の RMB ビット) |
+| `DEVPKEY_Device_RemovalPolicy` | "the current removal policy for a **device instance**" ([DEVPKEY_Device_RemovalPolicy](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/devpkey-device-removalpolicy)) | Windows (PnP マネージャー) |
+
+`RemovableMedia` は、CD やカードリーダーのように「ドライブは残して媒体だけを抜く」ものを表し、機器ごと抜けるかは表しません。
+実測でも、USB 接続の SSD 3 台はすべて `false`、`true` になったのは対象外にしたい BD ドライブだけでした ([findings.md](findings.md))。
+機器の自己申告なので、同じ USB メモリでも製品によって RMB ビットが 0 のことがあり、USB 以外の内蔵カードリーダーは `true` になります。
+
+**取り外しポリシーは、デバイスツリーから Windows が決める。**
+ストレージのクラスドライバー (classpnp) のサンプルソース ([Windows-driver-samples の class.c](https://github.com/microsoft/Windows-driver-samples/blob/main/storage/class/classpnp/src/class.c) の `ClasspInitializeHotplugInfo()`) は、取り外しポリシーをカーネルから受け取り、次のように説明しています。
+
+```c
+// Query the default removal policy from the kernel
+status = IoGetDeviceProperty(FdoExtension->LowerPdo, DevicePropertyRemovalPolicy, ...);
+...
+// use this info to set the DeviceHotplug setting
+// don't rely on DeviceCapabilities, since it can't properly
+// determine device relations, etc.  let the kernel figure this
+// stuff out instead.
+```
+
+ストレージドライバー自身が、機器の申告ではなく、デバイス同士の関係を見られるカーネルに判断を任せています。
+もとになるのは、デバイスツリー上の祖先が取り外し可能か (`DEVICE_CAPABILITIES.Removable`) で、USB ではこれを USB ハブドライバーが設定します ([DEVICE_CAPABILITIES](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_device_capabilities): "For USB devices, the USB hub driver sets the Removable parameter")。
+ストレージ API の `DeviceHotplug` も、この取り外しポリシーから作られます ([STORAGE_HOTPLUG_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_hotplug_info): "A hotplug device refers to a device whose RemovalPolicy value ... is ExpectSurpriseRemoval")。
+
+**「`ExpectNoRemoval` 以外」はユーザーの設定で変わらない。**
+デバイスマネージャーの「クイック削除 / 高パフォーマンス」の切り替えは、`ExpectSurpriseRemoval` と `ExpectOrderlyRemoval` の間でしか変えられません。同じ class.c に次のようにあります。
+
+```c
+// User can override only if the default removal policy is
+// orderly or suprise removal.
+...
+if ((userRemovalPolicy == RemovalPolicyExpectOrderlyRemoval) ||
+    (userRemovalPolicy == RemovalPolicyExpectSurpriseRemoval)) {
+```
+
+また、USB ディスクから起動した場合、起動ディスクは `ExpectOrderlyRemoval` に変えられます (同じファイルの `DeviceUsageTypeBoot` の処理)。
+`ExpectSurpriseRemoval` を必須にするとこれらの機器が外れるので、条件を「`ExpectNoRemoval` 以外」にしています。
+
+**弱いところ。**
+
+- 既定値の決め方は公開ドキュメントにありません。DEVPKEY のページは「Windows が設定する」とだけ書いており、上の説明はサンプルソースとそのコメントからの推定です。よく似た [DEVPKEY_Device_SafeRemovalRequired](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/devpkey-device-safeRemovalRequired) には「自身が親から取り外せるか、取り外せる祖先がある」という条件が明記されています。
+- USB の `Removable` は、ハブのディスクリプタや ACPI の記述 (`_UPC`、`_PLD`) をもとに決まります。記述の誤った機種では、内蔵機器が取り外し可能と報告されることがあります。
+- 既定値を上書きする [DEVPKEY_Device_RemovalPolicyOverride](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/devpkey-device-removalpolicyoverride) は、インストーラーから書き込めます。これで `ExpectNoRemoval` に変えられるかは確認していません。
+
 ### 6. (任意) 内蔵の USB 機器を外す
 
 `excludeInternalUsb` が true のとき (`usbinfo` では `--exclude-internal-usb`) だけ行います。
