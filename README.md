@@ -397,7 +397,7 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 | UAS 接続の機器 (ID が `SCSI\Disk&...`) | 抽出しない | 抽出する |
 | ノート PC の内蔵 USB カードリーダー | 抽出する | 取り外しポリシー次第。`excludeInternalUsb` で除外できる |
 
-新方式の手順 (使う API、引数、判定) は [docs/new-method-flow.md](docs/new-method-flow.md) に、タスクトレイ方式の手順は [docs/safe-removal-flow.md](docs/safe-removal-flow.md) に、判定で見ているインスタンス ID の成り立ちは [docs/instance-id.md](docs/instance-id.md) に、異なる GUID のインターフェイスが同じ devnode を指すケースの図解は [docs/device-interfaces.html](docs/device-interfaces.html) に、VID:PID (+ シリアル) で許可する機器を指定するホワイトリスト方式の設計は [docs/whitelist-flow.md](docs/whitelist-flow.md) にまとめています。
+新方式の手順 (使う API、引数、判定) は [docs/new-method-flow.md](docs/new-method-flow.md) に、タスクトレイ方式の手順は [docs/safe-removal-flow.md](docs/safe-removal-flow.md) に、既存コードに数行の変更だけを加えて UAS の USB メモリと USB の HDD/SSD に対応する最小改修案は [docs/legacy-minimal-flow.md](docs/legacy-minimal-flow.md) に、判定で見ているインスタンス ID の成り立ちは [docs/instance-id.md](docs/instance-id.md) に、異なる GUID のインターフェイスが同じ devnode を指すケースの図解は [docs/device-interfaces.html](docs/device-interfaces.html) に、VID:PID (+ シリアル) で許可する機器を指定するホワイトリスト方式の設計は [docs/whitelist-flow.md](docs/whitelist-flow.md) にまとめています。
 
 `-f letters` で 3 方式の結果を 1 ドライブ 1 行で比べられます。
 
