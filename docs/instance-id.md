@@ -175,6 +175,7 @@ usbinfo はこの一致を使って WPD デバイスとボリュームを対応�
 | ホワイトリスト方式: USB デバイス本体の特定 | なし (親が `GUID_DEVINTERFACE_USB_HUB` を登録しているか) | ドキュメント |
 | ホワイトリスト方式: VID / PID、シリアル番号 | なし (ハブへの IOCTL で機器のディスクリプタを直接読む) | ドキュメント ([whitelist-flow.md](whitelist-flow.md) を参照) |
 | 既存方式: USB 経由かの判定 | ボリュームの ID に `USBSTOR#` を含む | 観察のみ (ボリュームの ID の形はドキュメントに記載なし) |
+| 最小改修案: USB 経由かの判定 | 既存方式と同じ ID の確認に、バス種別 (`BusType == Usb`) を OR で加える。フロッピーの除外は ID を見ない (インターフェイスの有無) | ID の部分は既存方式と同じく観察のみ。バス種別の値はドキュメントにある ([legacy-minimal-flow.md](legacy-minimal-flow.md)) |
 | usbinfo: WPD とボリュームの対応付け | `SWD\WPDBUSENUM\` の後ろがボリュームの ID と同じ | 観察のみ |
 | usbinfo: `usbStorageDriverService`、`-f code` のディスクの種類 | なし (`DEVPKEY_Device_EnumeratorName` で列挙子を読む) | ドキュメント ([Hardware ID](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/hardware-ids) の `<enumerator>\...`) |
 | usbinfo: `-f code --vidpid` | なし (ハブから読んだデバイスディスクリプタ) | ドキュメント |

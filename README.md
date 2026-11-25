@@ -443,7 +443,7 @@ WPD デバイスの有無 (`wpdDevice`) は判定には使わず、比較用に�
 | 値 | 問題点 |
 |---|---|
 | `GetDriveType == DRIVE_REMOVABLE`、`RemovableMedia` | メディアが抜けるという意味で、USB HDD/SSD は該当しない。USB 以外のカードリーダーは該当する |
-| `BusType == Usb` | ベンダー製ドライバーでは別の値になることがあり、内蔵の USB 接続機器も含む |
+| `BusType == Usb` | ベンダー製ドライバーでは別の値になることがあり、内蔵の USB 接続機器も含む。最小改修案は、既存の ID の確認と `GetDriveType` に OR で足す形でだけ使っている ([docs/legacy-minimal-flow.md](docs/legacy-minimal-flow.md)) |
 | `DeviceHotplug` | eSATA などでも `true` になり、設定で変わる |
 | WMI の `MediaType` / `InterfaceType` | 上記の値を元にしており、同じ弱点を持つ |
 

@@ -531,7 +531,7 @@ summary { cursor: pointer; font: 500 var(--t-label) var(--font-mono); margin-bot
       <thead><tr><th>順</th><th>条件</th><th><code>New: result</code> の値</th><th>外れる例</th></tr></thead>
       <tbody>
         <tr><td class="num">1</td><td>ドライブレターがある</td><td><code>no drive letter</code></td><td>レターのないボリューム</td></tr>
-        <tr><td class="num">2</td><td>ID が <code>STORAGE\Volume\</code> で始まる</td><td><code>not a disk volume (optical/floppy)</code></td><td>光学ドライブ、フロッピー</td></tr>
+        <tr><td class="num">2</td><td>ボリュームの devnode が <code>GUID_DEVINTERFACE_CDROM</code> / <code>FLOPPY</code> を登録していない</td><td><code>not a disk volume (optical/floppy)</code></td><td>光学ドライブ、フロッピー</td></tr>
         <tr><td class="num">3</td><td>ディスク番号が取れる</td><td><code>IOCTL_STORAGE_GET_DEVICE_NUMBER failed (spanned volume?)</code></td><td>複数ディスクにまたがるボリューム</td></tr>
         <tr><td class="num">4</td><td><code>DeviceType</code> が <code>FILE_DEVICE_DISK</code></td><td><code>not FILE_DEVICE_DISK</code></td><td>ディスク以外</td></tr>
         <tr><td class="num">5</td><td>同じ番号のディスクがある</td><td><code>disk not found</code></td><td>ディスクのインターフェイスが未登録</td></tr>
@@ -550,7 +550,7 @@ summary { cursor: pointer; font: 500 var(--t-label) var(--font-mono); margin-bot
   <figure>
     <div class="steps-grid">
       <div class="chg"><span class="chip warn">削る</span><h3>1. GetDriveType で絞らない</h3><p>全レターのボリューム GUID を控える。</p><p class="fix">拾えるもの: USB HDD/SSD (FIXED)</p></div>
-      <div class="chg"><span class="chip ok">足す</span><h3>2. STORAGE\Volume\ で始まるものに限る</h3><p>1. で外れた光学ドライブとフロッピーを、ここで外す。</p><p class="fix">フロッピーは番号がハードディスクと重なるので、番号で探す前に外す</p></div>
+      <div class="chg"><span class="chip ok">足す</span><h3>2. ドライブ自身がボリュームを兼ねるものを外す</h3><p>1. で外れた光学ドライブとフロッピーを、ここで外す。ボリュームの devnode が CDROM / FLOPPY のインターフェイスも登録していれば、ドライブ自身と判定する (ID の文字列は見ない)。</p><p class="fix">フロッピーは番号がハードディスクと重なるので、番号で探す前に外す</p></div>
       <div class="chg"><span class="chip warn">置き換える</span><h3>3. ID の文字列照合をディスク番号の対応付けにする</h3><p><code>USBSTOR#</code> と <code>USBSTOR\</code> の照合を削り、IOCTL の番号でディスクを引く。</p><p class="fix">拾えるもの: UAS 機器、<code>{GUID}#…</code> 形のボリューム</p></div>
       <div class="chg"><span class="chip ok">足す</span><h3>4. ディスクの親をたどって USB を判定する</h3><p>親が USB ハブのノードがあれば USB とする。</p><p class="fix">BOT、UAS、ハブ経由のどれでも本体に届いた (実測)</p></div>
       <div class="chg"><span class="chip ok">足す</span><h3>5. 取り外しポリシーで内蔵扱いを外す</h3><p><code>ExpectNoRemoval</code> を外す。必要なら <code>excludeInternalUsb</code> も使う。</p><p class="fix">内蔵 NVMe は ExpectNoRemoval、USB 機器はすべて ExpectSurpriseRemoval だった</p></div>
