@@ -2663,62 +2663,40 @@ static int writeOutput(const std::wstring& out, const std::wstring& outFile, boo
 }
 
 // ---------------------------------------------------------------------------
-// main
+// 実行ログ (--all で表示・保存する)
 // ---------------------------------------------------------------------------
 
-static void usage()
+// 標準エラーへ書く。コンソールなら UTF-16 のまま、リダイレクト先には UTF-8 で書く (機器名などに日本語が入るため)
+static void writeStderr(const std::wstring& s)
 {
-    fputws(
-        L"usbinfo - USB device / storage information dumper\n"
-        L"\n"
-        L"usage: usbinfo [options]\n"
-        L"  -f, --format FORMAT          output format (default: text)\n"
-        L"                                 text | json   full dump\n"
-        L"                                 csv           per-disk comparison summary only\n"
-        L"                                 lsusb         one line per USB device, like lsusb\n"
-        L"                                 lsusb-tree    USB topology tree, like lsusb -tv\n"
-        L"                                 letters       drive letters selected by the legacy and new logic\n"
-        L"                                 code          short checksummed lines for manual transcription\n"
-        L"  -o, --out FILE               write UTF-8 output to FILE instead of stdout\n"
-        L"      --no-wmi                 skip WMI queries\n"
-        L"      --no-props               skip the full devnode property dump\n"
-        L"      --exclude-internal-usb   new logic: also drop USB devices without CM_DEVCAP_REMOVABLE\n"
-        L"      --vidpid                 -f code: append VID:PID to each line\n"
-        L"      --decode [FILE]          verify and expand typed -f code lines from FILE or stdin\n"
-        L"  -h, --help                   show this help\n",
-        stderr);
+    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+    DWORD mode = 0, written = 0;
+    if (GetConsoleMode(h, &mode)) WriteConsoleW(h, s.data(), (DWORD)s.size(), &written, nullptr);
+    else { std::string u = toUtf8(s); WriteFile(h, u.data(), (DWORD)u.size(), &written, nullptr); }
 }
+
+struct RunLog {
+    ULONGLONG start = GetTickCount64(), last = start;
+    std::wstring text;
+    bool echo = false;   // true なら標準エラーにも出す
+
+    void line(const std::wstring& s)
+    {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        ULONGLONG now = GetTickCount64();
+        std::wstring l = fmt(L"%02u:%02u:%02u.%03u  +%6llu ms  %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, now - last, s.c_str());
+        last = now;
+        text += l;
+        if (echo) writeStderr(l);
+    }
+};
 
 typedef LONG(WINAPI* RtlGetVersionFn)(OSVERSIONINFOW*);
 
-int wmain(int argc, wchar_t** argv)
+// 全情報を集めて root に入れる (text / json / csv と --all で共通)
+static void buildReport(const Options& opt, Node& root, RunLog& log)
 {
-    Options opt;
-    for (int i = 1; i < argc; ++i) {
-        std::wstring a = argv[i];
-        if ((a == L"-f" || a == L"--format") && i + 1 < argc) opt.format = argv[++i];
-        else if ((a == L"-o" || a == L"--out") && i + 1 < argc) opt.outFile = argv[++i];
-        else if (a == L"--no-wmi") opt.wmi = false;
-        else if (a == L"--no-props") opt.allProps = false;
-        else if (a == L"--exclude-internal-usb") opt.excludeInternalUsb = true;
-        else if (a == L"--vidpid") opt.vidPid = true;
-        else if (a == L"--decode") return decodeCodes(i + 1 < argc ? argv[i + 1] : nullptr);
-        else { usage(); return (a == L"-h" || a == L"--help") ? 0 : 2; }
-    }
-    if (opt.format != L"text" && opt.format != L"json" && opt.format != L"csv" &&
-        opt.format != L"lsusb" && opt.format != L"lsusb-tree" && opt.format != L"letters" && opt.format != L"code") { usage(); return 2; }
-
-    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);   // メディアなしドライブのダイアログ抑止
-
-    if (opt.format == L"lsusb" || opt.format == L"lsusb-tree")
-        return writeOutput(lsusb(opt.format == L"lsusb-tree"), opt.outFile, false);
-    if (opt.format == L"letters" || opt.format == L"code") {
-        Node arr;
-        compareDriveSelection(arr, opt.excludeInternalUsb);
-        return writeOutput(opt.format == L"code" ? codeReport(arr, opt.vidPid) : lettersTable(arr), opt.outFile, false);
-    }
-
-    Node root;
     root.str(L"tool", L"usbinfo 1.0");
     {
         SYSTEMTIME st;
@@ -2735,6 +2713,8 @@ int wmain(int argc, wchar_t** argv)
     Node& summary = root.arr(L"summary");
     Node& disks = root.arr(L"disks");
     Node& usbDevices = root.arr(L"usbDevices");
+
+    log.line(L"collecting USB devices (GUID_DEVINTERFACE_USB_DEVICE)");
 
     // --- USB デバイス全件 ---
     std::map<std::wstring, UsbBrief> usbCache;
@@ -2754,12 +2734,14 @@ int wmain(int argc, wchar_t** argv)
         c.kids = std::move(tmp.kids);
         if (opt.allProps) dumpAllProps(di, u.obj(L"allProperties"));
     }
+    log.line(fmt(L"USB devices: %zu", usbDevices.kids.size()));
 
     // --- ディスク / 光学ドライブ全件 (比較のため USB 以外も出力) ---
     std::vector<VolumeInfo> vols = collectVolumes();
     WmiData wmi;
     bool comInit = false;
     if (opt.wmi) {
+        log.line(L"querying WMI (Win32_DiskDrive, MSFT_Disk, MSFT_PhysicalDisk)");
         comInit = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
         CoInitializeSecurity(nullptr, -1, nullptr, nullptr, RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE, nullptr);
         std::wstring e1, e2, e3;
@@ -2769,9 +2751,14 @@ int wmain(int argc, wchar_t** argv)
         if (!e1.empty()) root.str(L"wmiError.Win32_DiskDrive", e1);
         if (!e2.empty()) root.str(L"wmiError.MSFT_Disk", e2);
         if (!e3.empty()) root.str(L"wmiError.MSFT_PhysicalDisk", e3);
+        log.line(fmt(L"WMI rows: Win32_DiskDrive=%zu MSFT_Disk=%zu MSFT_PhysicalDisk=%zu", wmi.diskDrive.size(), wmi.msftDisk.size(), wmi.msftPhysicalDisk.size()));
+        if (!e1.empty()) log.line(L"WMI error (Win32_DiskDrive): " + e1);
+        if (!e2.empty()) log.line(L"WMI error (MSFT_Disk): " + e2);
+        if (!e3.empty()) log.line(L"WMI error (MSFT_PhysicalDisk): " + e3);
     }
     // --- WPD デバイス全件 (MTP 機器なども含む) ---
     std::vector<WpdDevice> wpds = collectWpd();
+    log.line(fmt(L"WPD devices: %zu", wpds.size()));
     Node& wpdDevices = root.arr(L"wpdDevices");
     for (auto& w : wpds) {
         Node& n = wpdDevices.item();
@@ -2786,6 +2773,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     std::vector<VolumeIface> volIfaces = collectVolumeIfaces();
+    log.line(fmt(L"volumes (FindFirstVolume): %zu, volume interfaces: %zu", vols.size(), volIfaces.size()));
     // FindFirstVolume のボリュームに、同じ GUID パスを持つインターフェイスの devnode ID を結び付ける
     for (auto& v : vols)
         for (auto& vi : volIfaces)
@@ -2800,6 +2788,8 @@ int wmain(int argc, wchar_t** argv)
     for (auto& k : kinds)
         for (auto& path : listInterfaces(*k.first))
             diskResults.push_back(processDisk(path, k.second, opt, vols, volIfaces, wmi, wpds, usbCache, disks, summary));
+    for (const DiskResult& dr : diskResults)
+        log.line(fmt(L"%s %lu %s: %s", kindName(dr.kind), dr.deviceNumber, dr.model.c_str(), dr.verdict.c_str()));
     if (comInit) CoUninitialize();
 
     // --- ボリュームのインターフェイス起点の一覧 (GUID_DEVINTERFACE_VOLUME → ディスク番号 → ディスクの判定) ---
@@ -2833,12 +2823,147 @@ int wmain(int argc, wchar_t** argv)
     }
 
     // --- ドライブレターごとの既存方式 / 新方式の比較 ---
-    compareDriveSelection(root.arr(L"driveLetters"), opt.excludeInternalUsb);
+    log.line(L"comparing drive letter selection (legacy / minimal / new / safe removal)");
+    Node& letters = root.arr(L"driveLetters");
+    compareDriveSelection(letters, opt.excludeInternalUsb);
+    for (const Node& r : letters.kids) {
+        auto get = [](const Node* n, const wchar_t* k) { const Node* c = n ? n->find(k) : nullptr; return c ? c->val : std::wstring(); };
+        log.line(fmt(L"%s %s legacy=%s minimal=%s new=%s safe=%s  new: %s / safe: %s", get(&r, L"drive").c_str(), get(&r, L"driveType").c_str(),
+                     get(&r, L"legacy").c_str(), get(&r, L"legacyMinimal").c_str(), get(&r, L"new").c_str(), get(&r, L"safeRemoval").c_str(),
+                     get(r.find(L"newDetail"), L"result").c_str(), get(r.find(L"safeRemovalDetail"), L"result").c_str()));
+    }
+}
+
+// --all: 全情報を 1 回だけ集め、すべての形式をフォルダーに保存する。
+// 進み具合と各段階の結果をログとして標準エラーに出し、log.txt にも保存する。
+// 最後に -f code --vidpid の内容を標準出力に出す (ファイルを持ち出せない環境で、画面から写すため)。
+static int runAll(const Options& opt, std::wstring dir)
+{
+    RunLog log;
+    log.echo = true;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    if (dir.empty()) dir = fmt(L"usbinfo-%04u%02u%02u-%02u%02u%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    if (!CreateDirectoryW(dir.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        fwprintf(stderr, L"cannot create directory %s: %s\n", dir.c_str(), winErr(GetLastError()).c_str());
+        return 1;
+    }
+    log.line(L"usbinfo --all: output directory " + dir);
+    log.line(fmt(L"options: wmi=%s allProperties=%s excludeInternalUsb=%s safeRemovalIncludeNonUsb=%s",
+                 opt.wmi ? L"yes" : L"no", opt.allProps ? L"yes" : L"no", opt.excludeInternalUsb ? L"yes" : L"no",
+                 drivesel::kSafeRemovalIncludeNonUsb ? L"yes" : L"no"));
+
+    Node root;
+    buildReport(opt, root, log);
+    for (const wchar_t* k : { L"generatedAt", L"os" })
+        if (const Node* n = root.find(k)) log.line(std::wstring(k) + L": " + n->val);
+
+    int failed = 0;
+    auto save = [&](const wchar_t* name, const std::wstring& content, bool bom) {
+        std::wstring path = dir + L"\\" + name;
+        if (writeOutput(content, path, bom) != 0) { ++failed; log.line(L"FAILED to write " + path); }
+        else log.line(fmt(L"wrote %s (%zu characters)", path.c_str(), content.size()));
+    };
+
+    std::wstring s;
+    { size_t i = 0; for (const Node& k : root.kids) emitText(k, s, 0, false, i++); }
+    save(L"usbinfo.txt", s, false);
+    s.clear(); emitJson(root, s, 0); s += L"\n";
+    save(L"usbinfo.json", s, false);
+    s.clear(); if (const Node* sm = root.find(L"summary")) emitCsv(*sm, s);
+    save(L"summary.csv", s, true);
+    log.line(L"collecting USB topology for lsusb");
+    save(L"lsusb.txt", lsusb(false), false);
+    save(L"lsusb-tree.txt", lsusb(true), false);
+    Node none;
+    const Node* found = root.find(L"driveLetters");
+    const Node& letters = found ? *found : none;
+    save(L"letters.txt", lettersTable(letters), false);
+    save(L"code.txt", codeReport(letters, false), false);
+    std::wstring code = codeReport(letters, true);
+    save(L"code-vidpid.txt", code, false);
+
+    log.line(fmt(L"%s in %llu ms", failed ? L"finished with errors" : L"finished", GetTickCount64() - log.start));
+    if (writeOutput(log.text, dir + L"\\log.txt", false) != 0) ++failed;
+
+    writeStderr(L"\n-f code --vidpid (copy these lines by hand if files cannot be taken out):\n");
+    writeOutput(code, L"", false);
+    return failed ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+static void usage()
+{
+    fputws(
+        L"usbinfo - USB device / storage information dumper\n"
+        L"\n"
+        L"usage: usbinfo [options]\n"
+        L"  -f, --format FORMAT          output format (default: text)\n"
+        L"                                 text | json   full dump\n"
+        L"                                 csv           per-disk comparison summary only\n"
+        L"                                 lsusb         one line per USB device, like lsusb\n"
+        L"                                 lsusb-tree    USB topology tree, like lsusb -tv\n"
+        L"                                 letters       drive letters selected by the legacy and new logic\n"
+        L"                                 code          short checksummed lines for manual transcription\n"
+        L"  -o, --out FILE               write UTF-8 output to FILE instead of stdout\n"
+        L"      --all [DIR]              collect once and save every format to DIR, with a step log\n"
+        L"                                 (default DIR: usbinfo-YYYYMMDD-hhmmss; -f and -o are ignored)\n"
+        L"      --no-wmi                 skip WMI queries\n"
+        L"      --no-props               skip the full devnode property dump\n"
+        L"      --exclude-internal-usb   new logic: also drop USB devices without CM_DEVCAP_REMOVABLE\n"
+        L"      --vidpid                 -f code: append VID:PID to each line\n"
+        L"      --decode [FILE]          verify and expand typed -f code lines from FILE or stdin\n"
+        L"  -h, --help                   show this help\n",
+        stderr);
+}
+
+int wmain(int argc, wchar_t** argv)
+{
+    Options opt;
+    bool all = false;
+    std::wstring allDir;
+    for (int i = 1; i < argc; ++i) {
+        std::wstring a = argv[i];
+        if ((a == L"-f" || a == L"--format") && i + 1 < argc) opt.format = argv[++i];
+        else if ((a == L"-o" || a == L"--out") && i + 1 < argc) opt.outFile = argv[++i];
+        else if (a == L"--no-wmi") opt.wmi = false;
+        else if (a == L"--no-props") opt.allProps = false;
+        else if (a == L"--exclude-internal-usb") opt.excludeInternalUsb = true;
+        else if (a == L"--vidpid") opt.vidPid = true;
+        else if (a == L"--all") {
+            all = true;
+            if (i + 1 < argc && argv[i + 1][0] != L'-') allDir = argv[++i];
+        }
+        else if (a == L"--decode") return decodeCodes(i + 1 < argc ? argv[i + 1] : nullptr);
+        else { usage(); return (a == L"-h" || a == L"--help") ? 0 : 2; }
+    }
+    if (!all && opt.format != L"text" && opt.format != L"json" && opt.format != L"csv" &&
+        opt.format != L"lsusb" && opt.format != L"lsusb-tree" && opt.format != L"letters" && opt.format != L"code") { usage(); return 2; }
+
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);   // メディアなしドライブのダイアログ抑止
+
+    if (all) return runAll(opt, allDir);
+
+    if (opt.format == L"lsusb" || opt.format == L"lsusb-tree")
+        return writeOutput(lsusb(opt.format == L"lsusb-tree"), opt.outFile, false);
+    if (opt.format == L"letters" || opt.format == L"code") {
+        Node arr;
+        compareDriveSelection(arr, opt.excludeInternalUsb);
+        return writeOutput(opt.format == L"code" ? codeReport(arr, opt.vidPid) : lettersTable(arr), opt.outFile, false);
+    }
+
+    Node root;
+    RunLog log;   // 通常の実行では表示しない
+    buildReport(opt, root, log);
+    const Node* summaryNode = root.find(L"summary");
 
     // --- 出力 ---
     std::wstring out;
     if (opt.format == L"json") { emitJson(root, out, 0); out += L"\n"; }
-    else if (opt.format == L"csv") emitCsv(summary, out);
+    else if (opt.format == L"csv") { if (summaryNode) emitCsv(*summaryNode, out); }
     else { size_t i = 0; for (const Node& k : root.kids) emitText(k, out, 0, false, i++); }
 
     return writeOutput(out, opt.outFile, opt.format == L"csv");

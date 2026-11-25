@@ -11,6 +11,8 @@
    usbinfo -f code
    ```
 
+   `usbinfo --all` でも、最後に同じ内容 (`--vidpid` 付き) が表示されます。ファイルへの保存とあわせて行いたいときはこちらを使います。
+
    ```
    UI3 N03 8F
    C: FNN U GS NN N-- NN UN 99

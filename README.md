@@ -29,6 +29,7 @@ usbinfo [options]
 |---|---|
 | `-f`, `--format FORMAT` | 出力形式。既定は `text`。下の表を参照 |
 | `-o`, `--out FILE` | 標準出力の代わりに FILE へ書き出す。CSV のときは Excel で開けるよう BOM を付ける |
+| `--all [DIR]` | 情報を 1 回だけ集め、すべての形式を DIR に保存する。各段階のログも表示・保存する。DIR を省くと `usbinfo-YYYYMMDD-hhmmss`。`-f` と `-o` は無視する (「すべての形式をまとめて保存する」を参照) |
 | `--no-wmi` | WMI の問い合わせを省略する (実行が速くなる) |
 | `--no-props` | devnode の全プロパティダンプ (`allProperties`) を省略する |
 | `--exclude-internal-usb` | 新方式のドライブ抽出で、`CM_DEVCAP_REMOVABLE` が立っていない USB デバイス (内蔵扱い) も除外する |
@@ -54,7 +55,40 @@ usbinfo -f json -o result.json    同じ内容の JSON
 usbinfo -f csv  -o summary.csv    比較表のみ
 usbinfo -f lsusb                  USB デバイスの一覧
 usbinfo -f lsusb-tree             USB の接続ツリー
+usbinfo --all                     すべての形式をフォルダーに保存
 ```
+
+### すべての形式をまとめて保存する
+
+`usbinfo --all` は、情報を 1 回だけ集めて、すべての形式のファイルを 1 つのフォルダーに保存します。
+`--no-wmi`、`--no-props`、`--exclude-internal-usb` はそのまま効きます。
+
+```
+usbinfo --all                     カレントフォルダーの下に usbinfo-YYYYMMDD-hhmmss を作って保存
+usbinfo --all D:\logs\pc01        指定したフォルダーに保存 (なければ作る)
+```
+
+| ファイル | 内容 |
+|---|---|
+| `usbinfo.txt` | `-f text` と同じ (全情報) |
+| `usbinfo.json` | `-f json` と同じ |
+| `summary.csv` | `-f csv` と同じ (Excel 用の BOM 付き) |
+| `lsusb.txt` / `lsusb-tree.txt` | `-f lsusb` / `-f lsusb-tree` と同じ |
+| `letters.txt` | `-f letters` と同じ (ドライブレターごとの各方式の結果) |
+| `code.txt` / `code-vidpid.txt` | `-f code` / `-f code --vidpid` と同じ |
+| `log.txt` | 実行ログ |
+
+実行ログは、実行中に標準エラーにも表示します。各行に時刻と、前の行からの経過時間 (ms) が付きます。記録する内容は次のとおりです。
+
+- 出力先とオプション、実行日時と OS のバージョン
+- 集めた件数 (USB デバイス、WMI の各クラスの行数、WPD デバイス、ボリューム)。WMI のエラー
+- ディスク・光学ドライブ・フロッピーごとの判定結果 (`verdict`)
+- ドライブレターごとの各方式 (既存方式、最小改修案、新方式、タスクトレイ方式) の結果と、新方式・タスクトレイ方式で外れた理由
+- 保存したファイルと文字数。保存に失敗したファイル
+- 全体の所要時間
+
+最後に、`-f code --vidpid` の内容を標準出力に表示します。ファイルを持ち出せない環境では、この画面を写して持ち帰れます ([docs/manual-transcription.md](docs/manual-transcription.md))。
+保存に失敗したファイルがあれば、終了コードは 1 になります。
 
 ## lsusb 風の表示
 
