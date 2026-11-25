@@ -181,7 +181,7 @@ static bool isUsbBus(int driveIndex)
 最小改修案は usbinfo に実装済みです。既存コードの検証環境で次のどちらかを実行すれば、既存コード・新方式と並べて結果を確かめられます。
 
 - `usbinfo -f letters`: `Min` 列が最小改修案の結果、`Bus` 列がバス種別です。
-- `usbinfo -f code --vidpid`: 手で写して持ち帰る場合。13 文字目が最小改修案で抽出したか (`Y` / `N`)、14 文字目がバス種別 (`U` = Usb) です (形式 `UI2`。[manual-transcription.md](manual-transcription.md) を参照)。
+- `usbinfo -f code --vidpid`: 手で写して持ち帰る場合。13 文字目が最小改修案で抽出したか (`Y` / `N`)、14 文字目がバス種別 (`U` = Usb) です (形式 `UI2` 以降。[manual-transcription.md](manual-transcription.md) を参照)。
 
 | 確認すること | 期待する値 |
 |---|---|

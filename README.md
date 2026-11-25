@@ -417,7 +417,7 @@ C:   FIXED      -         -         -         -         same         Nvme       
 | `Disk` | ボリュームが載っているディスクの名前 |
 
 `-f json` / `-f text` の `driveLetters[]` には、`legacyDetail` (既存方式が見ている各チェックの結果) と `newDetail` (ディスク番号、ディスクと USB デバイス本体のインスタンス ID、ディスクの列挙子 (`diskEnumerator`)、ハブから読んだ VID:PID (`usbVidPid`)、取り外しポリシー、`capRemovable`、`inLocalMachineContainer`)、`legacyMinimalDetail` (最小改修案の結果、バス種別、既存の ID の確認の結果)、`safeRemovalDetail` (タスクトレイ方式の結果、ディスク自身の `SafeRemovalRequired`、TRUE だったノードのインスタンス ID と名前) も出力します。
-`-f code` には最小改修案の結果とバス種別を含めています (形式 `UI2`)。タスクトレイ方式の結果はまだ含めていません。
+`-f code` には、最小改修案の結果とバス種別 (形式 `UI2` で追加)、タスクトレイ方式の結果とディスク自身の `SafeRemovalRequired` (形式 `UI3` で追加) も含めています。
 
 ## 判定方法について
 
