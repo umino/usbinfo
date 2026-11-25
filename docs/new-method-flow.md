@@ -198,14 +198,49 @@ ACPI の記述 (`_UPC`、`_PLD`) に依存するため、記述が不正確な�
 
 ## 既存方式との違い
 
-| 条件 | 既存方式 | 新方式 |
-|---|---|---|
-| `GetDriveType == DRIVE_REMOVABLE` | 必須 | 使わない |
-| USB 経由かの判定 | ボリュームの ID が `USBSTOR#` を含む、または親の ID が `USBSTOR\` を含む | ディスクから親をたどり USB ハブに着く |
-| 光学ドライブの除外 | `GetDriveType` が `DRIVE_CDROM` になるので外れる | ボリュームの devnode がドライブのインターフェイスを持つか、`DeviceType` |
-| 取り外し可能かの判定 | `GetDriveType` (メディアが抜けるか) | ディスクの取り外しポリシー |
+### 既存方式 (既存コード) との違いの要約
 
-この結果、USB の HDD/SSD (`DRIVE_FIXED`) と UAS 接続の機器が新たに抽出されます。実機での比較は [findings.md](findings.md) の「既存方式と新方式の比較」にあります。
+既存方式は「メディアを抜けるか」(`GetDriveType`) と「ID に `USBSTOR` を含むか」で判定し、新方式は「USB 経由で接続されたディスクか」(デバイスツリー) と「機器ごと取り外せるか」(取り外しポリシー) で判定します。
+どちらもドライブレター → ボリュームを起点にしますが、新方式はボリュームからディスクへ番号で対応付け、ディスク側で判定します。
+
+| 判定する点 | 既存方式 | 新方式 |
+|---|---|---|
+| 取り外せるか | `GetDriveType` が `DRIVE_REMOVABLE` (メディアを抜けるか) | ディスクの取り外しポリシーが `ExpectNoRemoval` 以外 (機器ごと外せるか) |
+| USB 経由か | ボリュームの ID に `USBSTOR#` を含むか、親の ID に `USBSTOR\` を含む | ディスクから親をたどり、USB ハブ (`GUID_DEVINTERFACE_USB_HUB`) に着く |
+| どの機器か | 見ない | 見ない |
+| 光学ドライブ・フロッピーの除外 | 光学ドライブは `GetDriveType` が `DRIVE_CDROM` になるので外れる。フロッピーは `DRIVE_REMOVABLE` だが、ボリュームの ID (`USBSTOR\SFloppy&...`) が `USBSTOR#` を含まず、親も `USBSTOR\` を含まないので、結果として外れる | ボリュームの devnode が `GUID_DEVINTERFACE_CDROM` / `FLOPPY` を持つか、`DeviceType` で外す |
+| 判定する devnode | ボリューム (とその親) | ディスク (ボリュームからディスク番号で対応付ける) |
+| レターとの対応付け | ボリューム GUID の一致 | ボリューム GUID の一致 (同じ) |
+| ID の文字列の解析 | している (`USBSTOR` を探す) | していない |
+| 内蔵の USB 機器の除外 | なし | 取り外しポリシー。さらに `excludeInternalUsb` で `CM_DEVCAP_REMOVABLE` も見られる |
+
+新方式で良くなる点:
+
+- USB の HDD/SSD (`DRIVE_FIXED`) と UAS 接続の機器 (ID が `SCSI\Disk&...`) を取りこぼさない。実機では、既存方式で漏れた USB-SATA 変換の SSD を抽出できた ([findings.md](findings.md) の「既存方式と新方式の比較」)。
+- インスタンス ID の形 (`USBSTOR` を含むか) に頼らない。
+- 判定に使う値が「メディアを抜けるか」ではなく「機器ごと外せるか」なので、判定したいことと意味が合っている (手順 5 の「取り外しポリシーを使う根拠」を参照)。
+
+新方式で増える手間・弱くなる点:
+
+- 取り外しポリシーの既定値の決め方は公開されておらず、ACPI の記述 (`_UPC`、`_PLD`) にも依存する。内蔵の USB 機器を外せるかは未確認。
+- ボリュームからディスクへの対応付け (ディスク番号) とデバイスツリーのたどりが加わり、処理が長くなる。
+- 抽出される機器が増えるので、USB の HDD/SSD を対象に含めてよいかを運用側で確認する必要がある。
+- 機器の種類は問わないので、特定の機器だけに絞ることはできない (それが必要ならホワイトリスト方式。[whitelist-flow.md](whitelist-flow.md))。
+
+### ケースごとの抽出結果
+
+| ケース | 既存方式 | 新方式 |
+|---|---|---|
+| USB メモリ (BOT) | 抽出 | 抽出 |
+| USB の HDD/SSD (BOT、`DRIVE_FIXED`) | **抽出しない** | 抽出 |
+| USB の HDD/SSD (UAS、ID が `SCSI\Disk&...`) | **抽出しない** | 抽出 |
+| USB の光学ドライブ、暗号化 USB の仮想 CD-ROM | 抽出しない (`DRIVE_CDROM`) | 抽出しない |
+| USB フロッピー | 抽出しない (ID の確認で外れる) | 抽出しない |
+| 内蔵 NVMe / SATA SSD | 抽出しない | 抽出しない |
+| ノート PC の内蔵 USB カードリーダー | `DRIVE_REMOVABLE` なら抽出 | 取り外しポリシー次第。`excludeInternalUsb` で除外できる (未確認) |
+| SD ホストコントローラー接続のカードリーダー | 抽出しない (ID が `USBSTOR` を含まない) | 抽出しない (USB ハブに着かない) |
+
+USB メモリ、USB-SATA 変換の SSD、内蔵 NVMe の 3 つは実機で確認しました ([findings.md](findings.md))。それ以外は想定です。
 
 ## 判定が OS の振る舞いに依存する箇所
 
