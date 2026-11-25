@@ -2037,6 +2037,95 @@ static std::vector<DriveEntry> SelectDrivesSafeRemoval(bool includeNonUsb = kSaf
     return result;
 }
 
+// =====================================================================
+// 最小改修案 (docs/legacy-minimal-flow.md)
+//   既存方式の構造をそのまま残し、次の 3 点だけを変える。
+//   1. GetDriveType は DRIVE_REMOVABLE に加えて DRIVE_FIXED も候補に残す
+//   2. 既存の ID の確認 (USBSTOR# / USBSTOR\) に、ディスクのバス種別が USB か (BusType == BusTypeUsb) を OR で加える
+//   3. ボリュームの devnode が GUID_DEVINTERFACE_FLOPPY を登録していれば外す
+//      (2. で USB フロッピーが USB と判定されうるため。既存方式でもフロッピーは ID の確認で外れていた)
+//   既存方式で抽出していたドライブは、すべて引き続き抽出される。
+// =====================================================================
+
+struct MinimalTrace {
+    DEVINST devInst = 0;
+    std::wstring instanceId, volumeGuid;
+    bool idHasUsbstorHash = false, parentHasUsbstor = false;
+    int busType = -1;              // そのレターのバス種別 (STORAGE_BUS_TYPE。-1 = 取得できない、または調べていない)
+    const wchar_t* result = L"";
+};
+
+// ドライブレター (0 = A:) のボリュームの下にあるディスクのバス種別。取得できなければ -1
+// (ボリュームのハンドルへの IOCTL_STORAGE_QUERY_PROPERTY は、単一ディスクのボリュームならディスクの値を返す)
+static int queryBusType(int driveIndex)
+{
+    wchar_t path[] = { L'\\', L'\\', L'.', L'\\', (wchar_t)(L'A' + driveIndex), L':', 0 };
+    HANDLE h = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    STORAGE_PROPERTY_QUERY q = {};
+    q.PropertyId = StorageDeviceProperty;
+    q.QueryType = PropertyStandardQuery;
+    BYTE buf[1024] = {};
+    DWORD ret = 0;
+    BOOL ok = DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof(q), buf, sizeof(buf), &ret, nullptr);
+    CloseHandle(h);
+    const auto* d = (const STORAGE_DEVICE_DESCRIPTOR*)buf;
+    if (!ok || ret < offsetof(STORAGE_DEVICE_DESCRIPTOR, BusType) + sizeof(d->BusType)) return -1;
+    return (int)d->BusType;
+}
+
+static std::vector<DriveEntry> SelectDrivesLegacyMinimal(std::vector<MinimalTrace>* trace = nullptr)
+{
+    // 既存方式はここで GetDriveType が DRIVE_REMOVABLE のレターだけを控える。
+    // 外れた理由を出せるよう全レターを控え、種類の判定は後で行う (結果は同じ)。
+    struct VolumeInfo { int index; std::wstring guid; UINT driveType; int busType; };
+    std::vector<VolumeInfo> volumeInfos;
+    for (int i = 0; i < 26; ++i) {
+        wchar_t root[] = { (wchar_t)(L'A' + i), L':', L'\\', 0 };
+        wchar_t guid[MAX_PATH] = L"";
+        if (!GetVolumeNameForVolumeMountPointW(root, guid, _countof(guid))) continue;
+        UINT type = GetDriveTypeW(root);
+        bool candidate = type == DRIVE_REMOVABLE || type == DRIVE_FIXED;                    // 変更 1
+        volumeInfos.push_back({ i, guid, type, candidate ? queryBusType(i) : -1 });         // 変更 2 (バス種別を控える)
+    }
+
+    std::vector<DriveEntry> result;
+    HDEVINFO h = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_VOLUME, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (h == INVALID_HANDLE_VALUE) return result;
+    for (DWORD index = 0;; ++index) {
+        SP_DEVICE_INTERFACE_DATA ifData = { sizeof(ifData) };
+        if (!SetupDiEnumDeviceInterfaces(h, nullptr, &GUID_DEVINTERFACE_VOLUME, index, &ifData)) break;
+        SP_DEVINFO_DATA info = { sizeof(info) };
+        std::wstring path;
+        if (!interfaceDetail(h, ifData, path, &info)) continue;
+
+        MinimalTrace t;
+        t.devInst = info.DevInst;
+        t.instanceId = deviceId(info.DevInst);
+        t.volumeGuid = volumeGuidOf(path);
+        std::wstring parentId;
+        DEVINST parent = 0;
+        if (CM_Get_Parent(&parent, info.DevInst, 0) == CR_SUCCESS) parentId = deviceId(parent);
+        t.idHasUsbstorHash = t.instanceId.find(L"USBSTOR#") != std::wstring::npos;           // 既存の確認
+        t.parentHasUsbstor = parentId.find(L"USBSTOR\\") != std::wstring::npos;              // 既存の確認
+
+        auto finish = [&](const wchar_t* why) { t.result = why; if (trace) trace->push_back(t); };
+        std::vector<const VolumeInfo*> hits;
+        for (auto& v : volumeInfos)
+            if (!t.volumeGuid.empty() && v.guid == t.volumeGuid) hits.push_back(&v);
+        if (hits.empty()) { finish(L"no drive letter"); continue; }
+        t.busType = hits[0]->busType;
+        if (hits[0]->driveType != DRIVE_REMOVABLE && hits[0]->driveType != DRIVE_FIXED) { finish(L"drive type is not REMOVABLE/FIXED"); continue; }
+        if (hasInterface(t.instanceId, GUID_DEVINTERFACE_FLOPPY)) { finish(L"floppy drive"); continue; }   // 変更 3
+        bool busUsb = t.busType == BusTypeUsb;
+        if (!t.idHasUsbstorHash && !t.parentHasUsbstor && !busUsb) { finish(L"not USB (no USBSTOR in ID, BusType is not Usb)"); continue; }   // 変更 2
+        for (const VolumeInfo* v : hits) result.push_back({ v->index, info.DevInst });
+        finish(t.idHasUsbstorHash || t.parentHasUsbstor ? L"selected (USBSTOR in ID)" : L"selected (BusType is Usb)");
+    }
+    SetupDiDestroyDeviceInfoList(h);
+    return result;
+}
+
 }   // namespace drivesel
 
 // 既存方式と新方式の結果を、ドライブレターごとに並べる
@@ -2048,6 +2137,8 @@ static void compareDriveSelection(Node& arr, bool excludeInternalUsb)
     auto legacy = drivesel::SelectDrivesLegacy(&lt);
     auto modern = drivesel::SelectDrivesNew(excludeInternalUsb, &nt);
     auto safe = drivesel::SelectDrivesSafeRemoval(drivesel::kSafeRemovalIncludeNonUsb, &st);
+    std::vector<drivesel::MinimalTrace> mt;
+    auto minimal = drivesel::SelectDrivesLegacyMinimal(&mt);
 
     for (int i = 0; i < 26; ++i) {
         wchar_t root[] = { (wchar_t)(L'A' + i), L':', L'\\', 0 };
@@ -2063,6 +2154,10 @@ static void compareDriveSelection(Node& arr, bool excludeInternalUsb)
         for (auto& e : safe) if (e.driveIndex == i) { se = &e; break; }
         const drivesel::SafeRemovalTrace* sr = nullptr;
         for (auto& t : st) if (_wcsicmp(t.volumeGuid.c_str(), guid) == 0) { sr = &t; break; }
+        const drivesel::DriveEntry* me = nullptr;
+        for (auto& e : minimal) if (e.driveIndex == i) { me = &e; break; }
+        const drivesel::MinimalTrace* mr = nullptr;
+        for (auto& t : mt) if (_wcsicmp(t.volumeGuid.c_str(), guid) == 0) { mr = &t; break; }
         const drivesel::LegacyTrace* l = nullptr;
         const drivesel::NewTrace* n = nullptr;
         for (auto& t : lt) if (_wcsicmp(t.volumeGuid.c_str(), guid) == 0) { l = &t; break; }
@@ -2076,6 +2171,7 @@ static void compareDriveSelection(Node& arr, bool excludeInternalUsb)
         r.str(L"volumeGuid", guid);
         r.str(L"volumeInstanceId", n ? n->instanceId : l ? l->instanceId : L"(not found in GUID_DEVINTERFACE_VOLUME)");
         r.str(L"legacy", le ? L"selected" : L"-");
+        r.str(L"legacyMinimal", me ? L"selected" : L"-");
         r.str(L"new", ne ? L"selected" : L"-");
         r.str(L"safeRemoval", se ? L"selected" : L"-");
         // devinst は「不透明なハンドル」なので数値では比べず、指す devnode のインスタンス ID で比べる
@@ -2116,6 +2212,14 @@ static void compareDriveSelection(Node& arr, bool excludeInternalUsb)
             }
         } else no.str(L"result", L"(volume interface not found)");
 
+        Node& mo = r.obj(L"legacyMinimalDetail");
+        if (mr) {
+            mo.str(L"result", mr->result);
+            mo.str(L"busType", mr->busType < 0 ? L"?" : busTypeName((DWORD)mr->busType));
+            mo.boolean(L"idHasUsbstorHash", mr->idHasUsbstorHash);
+            mo.boolean(L"parentHasUsbstor", mr->parentHasUsbstor);
+        } else mo.str(L"result", L"(volume interface not found)");
+
         Node& so = r.obj(L"safeRemovalDetail");
         so.boolean(L"includeNonUsb", drivesel::kSafeRemovalIncludeNonUsb);
         if (sr) {
@@ -2143,19 +2247,21 @@ static std::wstring lettersTable(const Node& arr)
         const Node* c = n.find(k);
         return c ? c->val : L"";
     };
-    std::wstring o = fmt(L"%-4s %-10s %-9s %-9s %-9s %-12s %-40s %-32s %s\n", L"Drv", L"DriveType", L"Legacy", L"New", L"Safe",
-                         L"Diff", L"New: result", L"Safe: node / result", L"Disk");
+    std::wstring o = fmt(L"%-4s %-10s %-9s %-9s %-9s %-9s %-12s %-10s %-40s %-32s %s\n", L"Drv", L"DriveType", L"Legacy", L"Min", L"New", L"Safe",
+                         L"Diff", L"Bus", L"New: result", L"Safe: node / result", L"Disk");
     for (const Node& r : arr.kids) {
         const Node* nd = r.find(L"newDetail");
         const Node* sd = r.find(L"safeRemovalDetail");
+        const Node* md = r.find(L"legacyMinimalDetail");
+        std::wstring bus = md ? get(*md, L"busType") : L"";
         std::wstring result = nd ? get(*nd, L"result") : L"";
         std::wstring disk = nd ? get(*nd, L"diskName") : L"";
         // タスクトレイ方式: 採用したときは取り外し対象のノード名 (タスクトレイの表示と見比べる)、外したときは理由
         std::wstring safe = sd ? get(*sd, L"result") : L"";
         if (sd && safe == L"selected") safe = get(*sd, L"safeRemovalNodeName");
-        o += fmt(L"%-4s %-10s %-9s %-9s %-9s %-12s %-40s %-32s %s\n", get(r, L"drive").c_str(), get(r, L"driveType").c_str(),
-                 get(r, L"legacy").c_str(), get(r, L"new").c_str(), get(r, L"safeRemoval").c_str(), get(r, L"diff").c_str(),
-                 result.c_str(), safe.c_str(), disk.c_str());
+        o += fmt(L"%-4s %-10s %-9s %-9s %-9s %-9s %-12s %-10s %-40s %-32s %s\n", get(r, L"drive").c_str(), get(r, L"driveType").c_str(),
+                 get(r, L"legacy").c_str(), get(r, L"legacyMinimal").c_str(), get(r, L"new").c_str(), get(r, L"safeRemoval").c_str(),
+                 get(r, L"diff").c_str(), bus.c_str(), result.c_str(), safe.c_str(), disk.c_str());
     }
     return o;
 }
@@ -2316,10 +2422,12 @@ static std::wstring lsusb(bool tree)
 // ---------------------------------------------------------------------------
 // 目コピ用の短いコード (-f code) とその検証 (--decode)
 //
-//   UI1 N03 A3                         ヘッダー: 形式バージョン、ドライブ行の数、チェック値
-//   E: FNY S GU NN SYN 2E              ドライブ行
-//   |  ||| | || || ||| +- CRC-8 (空白と : を除いた文字列に対する 16 進 2 桁)
-//   |  ||| | || || ||+--- USB デバイスが PC 本体のコンテナー内か (Y/N/-)
+//   UI2 N03 A3                         ヘッダー: 形式バージョン、ドライブ行の数、チェック値
+//   E: FNY S GU NN SYN YU 2E           ドライブ行
+//   |  ||| | || || ||| || +- CRC-8 (空白と : を除いた文字列に対する 16 進 2 桁)
+//   |  ||| | || || ||| |+--- (UI2) ディスクのバス種別 (U=Usb A=Sata/Ata N=Nvme S=Scsi/Sas D=Sd/Mmc R=RAID O=その他 -)
+//   |  ||| | || || ||| +---- (UI2) 最小改修案で抽出 (Y/N)
+//   |  ||| | || || ||+------ USB デバイスが PC 本体のコンテナー内か (Y/N/-)
 //   |  ||| | || || |+---- USB デバイスの CM_DEVCAP_REMOVABLE (Y/N/-)
 //   |  ||| | || || +----- ディスクの取り外しポリシー (N=NoRemoval O=Orderly S=Surprise -)
 //   |  ||| | || |+------- 既存方式: 親の ID が USBSTOR\ を含む (Y/N/-)
@@ -2332,6 +2440,7 @@ static std::wstring lsusb(bool tree)
 //   |  +----------------- GetDriveType (R/F/C/W/M/U)
 //   +-------------------- ドライブレター
 //
+// UI1 (最後の 2 文字の組がない形式) も --decode で読める。行の長さで見分ける。
 // シリアル番号、PC 名、ボリューム GUID は含めない。VID:PID は --vidpid のときだけ付ける。
 // ---------------------------------------------------------------------------
 
@@ -2385,6 +2494,19 @@ static wchar_t codeVolumeForm(std::wstring id)
     return L'D';   // ドライブ自身の devnode (光学ドライブ、フロッピー)
 }
 
+// バス種別 (busTypeName の名前) を 1 文字にする
+static wchar_t codeBusType(const std::wstring& b)
+{
+    if (b == L"Usb") return L'U';
+    if (b == L"Sata" || b == L"Ata" || b == L"Atapi") return L'A';
+    if (b == L"Nvme") return L'N';
+    if (b == L"Scsi" || b == L"Sas") return L'S';
+    if (b == L"Sd" || b == L"Mmc") return L'D';
+    if (b == L"RAID") return L'R';
+    if (b.empty() || b == L"?") return L'-';
+    return L'O';
+}
+
 static std::wstring codeReport(const Node& arr, bool withVidPid)
 {
     auto seal = [](const std::wstring& body) {
@@ -2392,10 +2514,11 @@ static std::wstring codeReport(const Node& arr, bool withVidPid)
         for (wchar_t c : body) a += (char)c;
         return body + fmt(L" %02X\n", crc8(codeNormalize(a)));
     };
-    std::wstring o = seal(fmt(L"UI1 N%02zu", arr.kids.size()));
+    std::wstring o = seal(fmt(L"UI2 N%02zu", arr.kids.size()));
     for (const Node& r : arr.kids) {
         const Node* d = r.find(L"newDetail");
         const Node* l = r.find(L"legacyDetail");
+        const Node* m = r.find(L"legacyMinimalDetail");
         auto val = [](const Node* p, const wchar_t* k) { const Node* n = p ? p->find(k) : nullptr; return n ? n->val : std::wstring(); };
 
         std::wstring dt = val(&r, L"driveType");
@@ -2410,6 +2533,8 @@ static std::wstring codeReport(const Node& arr, bool withVidPid)
                                 codeReason(val(d, L"result")), codeVolumeForm(val(&r, L"volumeInstanceId")), disk,
                                 codeBool(l, L"idHasUsbstorHash"), codeBool(l, L"parentHasUsbstor"),
                                 policy, codeBool(d, L"usbCapRemovable"), codeBool(d, L"usbInLocalMachineContainer"));
+        // UI2 で追加: 最小改修案で抽出 (Y/N) とバス種別
+        line += fmt(L" %c%c", val(&r, L"legacyMinimal") == L"selected" ? L'Y' : L'N', codeBusType(val(m, L"busType")));
         if (withVidPid) {
             std::wstring vp = val(d, L"usbVidPid");
             line += vp.size() == 9 ? L" " + vp : L" ----:----";
@@ -2449,6 +2574,7 @@ static int decodeCodes(const wchar_t* file)
     static const char* const kVol = "U=_??_USBSTOR#|S=_??_SCSI#|T=_??_other|G={GUID}#offset|D=drive itself|X=unknown";
     static const char* const kDisk = "U=USBSTOR|S=SCSI|O=other|-=none";
     static const char* const kPol = "N=ExpectNoRemoval|O=ExpectOrderlyRemoval|S=ExpectSurpriseRemoval|-=n/a";
+    static const char* const kBus = "U=Usb|A=Sata/Ata|N=Nvme|S=Scsi/Sas|D=Sd/Mmc|R=RAID|O=other|-=n/a";
 
     std::string o;
     int lineNo = 0, bad = 0, drives = 0, expected = -1;
@@ -2471,18 +2597,23 @@ static int decodeCodes(const wchar_t* file)
         bool hexOk = isxdigit((unsigned char)n[n.size() - 2]) && isxdigit((unsigned char)n[n.size() - 1]);
         if (!hexOk || sscanf_s(n.c_str() + n.size() - 2, "%2x", &given) != 1 || crc8(body) != given) { fail("checksum mismatch, reread this line"); continue; }
 
-        if (body.rfind("UI1N", 0) == 0 && body.size() == 6 && isdigit((unsigned char)body[4]) && isdigit((unsigned char)body[5])) {
+        if ((body.rfind("UI1N", 0) == 0 || body.rfind("UI2N", 0) == 0) && body.size() == 6 &&
+            isdigit((unsigned char)body[4]) && isdigit((unsigned char)body[5])) {
             expected = atoi(body.c_str() + 4);
             continue;
         }
-        if (body.size() != 12 && body.size() != 20) { fail("wrong length"); continue; }
-        const char* tables[] = { kType, kYN, kYN, kReason, kVol, kDisk, kTri, kTri, kPol, kTri, kTri };
-        const char* names[11] = {};
+        // 行の長さで形式を見分ける。UI1: 12 (VID:PID 付きは 20)、UI2: 14 (VID:PID 付きは 22)
+        const bool v2 = body.size() == 14 || body.size() == 22;
+        if (body.size() != 12 && body.size() != 20 && !v2) { fail("wrong length"); continue; }
+        const size_t fields = v2 ? 13 : 11;
+        const size_t vidpidAt = fields + 1;
+        const char* tables[] = { kType, kYN, kYN, kReason, kVol, kDisk, kTri, kTri, kPol, kTri, kTri, kYN, kBus };
+        const char* names[13] = {};
         bool ok = body[0] >= 'A' && body[0] <= 'Z';
-        for (int i = 0; ok && i < 11; ++i) {
+        for (size_t i = 0; ok && i < fields; ++i) {
             const char* name = codeName(body[i + 1], tables[i]);
             if (!name) { ok = false; break; }
-            static std::string keep[11];
+            static std::string keep[13];
             keep[i] = name;
             names[i] = keep[i].c_str();
         }
@@ -2493,10 +2624,11 @@ static int decodeCodes(const wchar_t* file)
         sprintf_s(m, "OK %c: %s legacy=%s new=%s diff=%s reason=%s volumeId=%s diskId=%s legacyIdHit=%s legacyParentHit=%s policy=%s capRemovable=%s inLocalMachine=%s",
                   body[0], names[0], names[1], names[2], diff, names[3], names[4], names[5], names[6], names[7], names[8], names[9], names[10]);
         o += m;
-        if (body.size() == 20) o += " vidpid=" + body.substr(12, 4) + ":" + body.substr(16, 4);
+        if (v2) { o += " minimal="; o += names[11]; o += " bus="; o += names[12]; }
+        if (body.size() == vidpidAt + 8) o += " vidpid=" + body.substr(vidpidAt, 4) + ":" + body.substr(vidpidAt + 4, 4);
         o += "\n";
     }
-    if (expected < 0) { o += "NG header line (UI1 Nnn) is missing\n"; ++bad; }
+    if (expected < 0) { o += "NG header line (UI1 Nnn / UI2 Nnn) is missing\n"; ++bad; }
     else if (expected != drives) { char m[96]; sprintf_s(m, "NG drive lines: header says %d, valid lines %d\n", expected, drives); o += m; ++bad; }
     o += bad ? "RESULT: NG, reread the lines above\n" : "RESULT: OK\n";
     fputs(o.c_str(), stdout);

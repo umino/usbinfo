@@ -12,10 +12,10 @@
    ```
 
    ```
-   UI1 N03 A3
-   C: FNN U GS NN N-- 7D
-   D: RYY S UU YN SYN 04
-   E: FNY S GU NN SYN 2E
+   UI2 N03 99
+   C: FNN U GS NN N-- NN 2B
+   D: RYY S UU YN SYN YU 49
+   E: FNY S GU NN SYN YU 65
    ```
 
    (上は例です。実際に画面に出た値を写してください。)
@@ -29,7 +29,7 @@
 3. `NG` の行があれば、その行だけ検証環境の画面と見比べて直します。
 4. `RESULT: OK` になったら、コードか展開結果を Claude に貼り付けます。
 
-空白、`:`、大文字小文字の違いは無視するので、`efnysgunnsyn2e` のように続けて打っても検証できます。`#` で始まる行はメモとして無視します。機器の状態などを `# E: USB-SATA の SSD` のように書き添えられます。
+空白、`:`、大文字小文字の違いは無視するので、`efnysgunnsynyu65` のように続けて打っても検証できます。`#` で始まる行はメモとして無視します。機器の状態などを `# E: USB-SATA の SSD` のように書き添えられます。
 
 ## 検出できる写し間違い
 
@@ -40,7 +40,7 @@
 ## コードの読み方
 
 ```
-E: FNY S GU NN SYN 2E
+E: FNY S GU NN SYN YU 65
 ```
 
 | 位置 | 例 | 意味 | 値 |
@@ -57,7 +57,14 @@ E: FNY S GU NN SYN 2E
 | 10 | `S` | 取り外しポリシー | `N` NoRemoval、`O` Orderly、`S` Surprise、`-` 不明 |
 | 11 | `Y` | USB デバイスの `CM_DEVCAP_REMOVABLE` | `Y` / `N` / `-` |
 | 12 | `N` | USB デバイスが PC 本体のコンテナー内 | `Y` / `N` / `-` |
-| 末尾 | `2E` | チェック値 (CRC-8) | 16 進 2 桁 |
+| 13 | `Y` | 最小改修案で抽出 ([legacy-minimal-flow.md](legacy-minimal-flow.md)) | `Y` / `N` |
+| 14 | `U` | ディスクのバス種別 (`STORAGE_DEVICE_DESCRIPTOR.BusType`) | `U` Usb、`A` Sata / Ata、`N` Nvme、`S` Scsi / Sas、`D` Sd / Mmc、`R` RAID、`O` その他、`-` 取得できない |
+| 末尾 | `65` | チェック値 (CRC-8) | 16 進 2 桁 |
+
+### 形式のバージョン
+
+ヘッダーの `UI2` が形式のバージョンです。13、14 文字目 (最小改修案の結果とバス種別) は `UI2` で追加しました。
+以前の `UI1` 形式 (12 文字目まで) で写したコードも、`--decode` でそのまま検証できます。行の長さで形式を見分けます。
 
 ## 含まれる情報
 

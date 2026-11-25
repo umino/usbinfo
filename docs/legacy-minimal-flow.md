@@ -6,6 +6,7 @@
 - **USB 接続の HDD/SSD** (同じく J:、`4971:1025`。1 台目の PC の E: も同じ)
 
 どちらも既存コードでは漏れることを、実機で確認しています ([findings.md](findings.md) の「既存コードの検証環境での比較」)。
+usbinfo では `drivesel::SelectDrivesLegacyMinimal()` として実装しています。
 新方式 ([new-method-flow.md](new-method-flow.md)) やホワイトリスト方式 ([whitelist-flow.md](whitelist-flow.md)) のような作り直しをせず、既存コードへの差分を小さく保つことを優先します。
 
 ## 既存コードが漏らす原因
@@ -177,14 +178,15 @@ static bool isUsbBus(int driveIndex)
 
 ## 採用前に確認すること
 
-既存コードの検証環境で、`usbinfo -f csv` を実行し、`mounts`、`driveType`、`busType` の 3 列を見れば、最小改修案の結果を予想できます。
+最小改修案は usbinfo に実装済みです。既存コードの検証環境で次のどちらかを実行すれば、既存コード・新方式と並べて結果を確かめられます。
 
-| 確認すること | 見る場所 | 期待する値 |
-|---|---|---|
-| K: (SanDisk) と J: (USB HDD) のバス種別 | `busType` | `Usb` |
-| 内蔵ディスク (C:〜F:) のバス種別 | `busType` | `Usb` 以外 (`Sata`、`Nvme`、`Raid` など) |
-| フロッピー (A:) が USB か | `usbAncestor` (`kind` が `Floppy` の行) | `true` なら変更 3 が必要 |
-| システムドライブが USB でないか | C: の `busType` | `Usb` 以外 |
+- `usbinfo -f letters`: `Min` 列が最小改修案の結果、`Bus` 列がバス種別です。
+- `usbinfo -f code --vidpid`: 手で写して持ち帰る場合。13 文字目が最小改修案で抽出したか (`Y` / `N`)、14 文字目がバス種別 (`U` = Usb) です (形式 `UI2`。[manual-transcription.md](manual-transcription.md) を参照)。
 
-`-f code` (手で写す用の短いコード) にはバス種別が入っていないので、手で写して持ち帰る場合は `-f code` に項目を足す必要があります。
-また、最小改修案そのものを usbinfo に実装して `-f letters` に列を足せば、実機で既存コード・新方式と直接比べられます。
+| 確認すること | 期待する値 |
+|---|---|
+| H: (既存コードで抽出していた USB メモリ) | `Min` が `selected` (13 文字目 `Y`) |
+| K: (SanDisk の UAS メモリ) と J: (USB HDD) | `Min` が `selected`、`Bus` が `Usb` (13、14 文字目 `YU`) |
+| 内蔵ディスク (C:〜F:) | `Min` が `-`、`Bus` が `Usb` 以外 |
+| フロッピー (A:) と光学ドライブ (G:、I:) | `Min` が `-` |
+| システムドライブ | `Bus` が `Usb` 以外 (USB から起動していない) |

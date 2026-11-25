@@ -43,7 +43,7 @@ usbinfo [options]
 | `csv` | ディスク 1 台 1 行の比較表 (`summary`) だけを出力する |
 | `lsusb` | USB デバイスを 1 台 1 行で一覧する (Linux の `lsusb` 風) |
 | `lsusb-tree` | USB の接続ツリーを表示する (Linux の `lsusb -tv` 風) |
-| `letters` | ドライブレターごとに、既存方式と新方式で抽出されるかを並べる (「ドライブレターの抽出」を参照) |
+| `letters` | ドライブレターごとに、各方式で抽出されるかを並べる (「ドライブレターの抽出」を参照) |
 | `code` | 比較結果を、手で写しやすいチェック値付きの短いコードで出力する ([docs/manual-transcription.md](docs/manual-transcription.md) を参照) |
 
 例:
@@ -366,9 +366,9 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 フロッピーを番号で対応付けてはいけない理由は、フロッピーのボリュームに `IOCTL_STORAGE_GET_DEVICE_NUMBER` を発行すると、`DeviceType` が `FILE_DEVICE_DISK`、`DeviceNumber` がフロッピーの通し番号 (`\Device\Floppy0` なら 0) になるためです。
 この番号はハードディスクの番号 (`PhysicalDrive0`) と区別がつかず、種類と番号だけで探すと `PhysicalDrive0` のディスクに誤って対応付けられます。
 
-## ドライブレターの抽出 (既存方式・新方式・タスクトレイ方式の比較)
+## ドライブレターの抽出 (既存方式・最小改修案・新方式・タスクトレイ方式の比較)
 
-`usbinfo.cpp` の `namespace drivesel` に、「リムーバブルな USB ストレージのドライブレター」を抽出する関数を 3 つ用意しています。
+`usbinfo.cpp` の `namespace drivesel` に、「リムーバブルな USB ストレージのドライブレター」を抽出する関数を 4 つ用意しています。
 どれも結果は `DriveEntry { int driveIndex; DEVINST devInst; }` のリストで、既存コードの出力 (ドライブレター index と devinst の組) と同じ形です。
 `devInst` は `GUID_DEVINTERFACE_VOLUME` を SetupDi で列挙したときの `SP_DEVINFO_DATA.DevInst` です。
 この namespace は usbinfo の他の部分に依存しないので、そのまま移植できます (`setupapi.lib` と `cfgmgr32.lib` が必要)。
@@ -376,6 +376,7 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 | 関数 | 内容 |
 |---|---|
 | `SelectDrivesLegacy()` | 既存方式の再現。`GetDriveType` が `DRIVE_REMOVABLE` のドライブのうち、ボリュームの devnode の ID が `USBSTOR#` を含むか、親の ID が `USBSTOR\` を含むもの |
+| `SelectDrivesLegacyMinimal()` | 最小改修案。既存方式に 3 点だけ変更を加えたもの: `DRIVE_FIXED` も候補に残す、ID の確認にディスクのバス種別が `Usb` かを OR で加える、フロッピー (`GUID_DEVINTERFACE_FLOPPY` を登録したボリュームの devnode) を外す。既存方式で抽出していたものは、すべて抽出する ([docs/legacy-minimal-flow.md](docs/legacy-minimal-flow.md)) |
 | `SelectDrivesNew(excludeInternalUsb)` | 新方式。下記の条件をすべて満たすもの |
 | `SelectDrivesSafeRemoval(includeNonUsb)` | タスクトレイ方式。「ハードウェアを安全に取り外してメディアを取り出す」に出るものと同じ基準 (`DEVPKEY_Device_SafeRemovalRequired`) で抽出する。新方式の 1.〜3. のあと、ディスク自身か祖先のどれかで `DEVPKEY_Device_SafeRemovalRequired` が TRUE のもの。`includeNonUsb` が false なら 4. (USB 経由) も満たすもの。既定値は定数 `kSafeRemovalIncludeNonUsb` (= `false`、USB のみ) |
 
@@ -399,23 +400,24 @@ UAS 対応機器は同じインターフェイスに BOT と UAS の両方の代
 
 新方式の手順 (使う API、引数、判定) は [docs/new-method-flow.md](docs/new-method-flow.md) に、タスクトレイ方式の手順は [docs/safe-removal-flow.md](docs/safe-removal-flow.md) に、既存コードに数行の変更だけを加えて UAS の USB メモリと USB の HDD/SSD に対応する最小改修案は [docs/legacy-minimal-flow.md](docs/legacy-minimal-flow.md) に、判定で見ているインスタンス ID の成り立ちは [docs/instance-id.md](docs/instance-id.md) に、異なる GUID のインターフェイスが同じ devnode を指すケースの図解は [docs/device-interfaces.html](docs/device-interfaces.html) に、VID:PID (+ シリアル) で許可する機器を指定するホワイトリスト方式の設計は [docs/whitelist-flow.md](docs/whitelist-flow.md) にまとめています。
 
-`-f letters` で 3 方式の結果を 1 ドライブ 1 行で比べられます。
+`-f letters` で 4 方式の結果を 1 ドライブ 1 行で比べられます。
 
 ```
-Drv  DriveType  Legacy    New       Safe      Diff         New: result                              Safe: node / result              Disk
-C:   FIXED      -         -         -         same         not USB                                  not USB                          CT1000P310SSD8
+Drv  DriveType  Legacy    Min       New       Safe      Diff         Bus        New: result                              Safe: node / result              Disk
+C:   FIXED      -         -         -         -         same         Nvme       not USB                                  not USB                          CT1000P310SSD8
 ```
 
 | 列 | 意味 |
 |---|---|
-| `Legacy` / `New` / `Safe` | その方式で抽出されれば `selected`。`Safe` はタスクトレイ方式 |
+| `Legacy` / `Min` / `New` / `Safe` | その方式で抽出されれば `selected`。`Min` は最小改修案、`Safe` はタスクトレイ方式 |
 | `Diff` | 既存方式と新方式の比較。`same` (結果が同じ)、`LEGACY ONLY`、`NEW ONLY` |
+| `Bus` | 最小改修案が見ているディスクのバス種別 (`Usb`、`Sata`、`Nvme` など。`?` は取得できない、または `GetDriveType` で対象外) |
 | `New: result` | 新方式で抽出した、または除外した理由 |
 | `Safe: node / result` | タスクトレイ方式で抽出したときは、`SafeRemovalRequired` が TRUE だったノードの名前 (タスクトレイの一覧に出る名前と見比べる)。除外したときはその理由 |
 | `Disk` | ボリュームが載っているディスクの名前 |
 
-`-f json` / `-f text` の `driveLetters[]` には、`legacyDetail` (既存方式が見ている各チェックの結果) と `newDetail` (ディスク番号、ディスクと USB デバイス本体のインスタンス ID、ディスクの列挙子 (`diskEnumerator`)、ハブから読んだ VID:PID (`usbVidPid`)、取り外しポリシー、`capRemovable`、`inLocalMachineContainer`)、`safeRemovalDetail` (タスクトレイ方式の結果、ディスク自身の `SafeRemovalRequired`、TRUE だったノードのインスタンス ID と名前) も出力します。
-`-f code` には、タスクトレイ方式の結果はまだ含めていません。
+`-f json` / `-f text` の `driveLetters[]` には、`legacyDetail` (既存方式が見ている各チェックの結果) と `newDetail` (ディスク番号、ディスクと USB デバイス本体のインスタンス ID、ディスクの列挙子 (`diskEnumerator`)、ハブから読んだ VID:PID (`usbVidPid`)、取り外しポリシー、`capRemovable`、`inLocalMachineContainer`)、`legacyMinimalDetail` (最小改修案の結果、バス種別、既存の ID の確認の結果)、`safeRemovalDetail` (タスクトレイ方式の結果、ディスク自身の `SafeRemovalRequired`、TRUE だったノードのインスタンス ID と名前) も出力します。
+`-f code` には最小改修案の結果とバス種別を含めています (形式 `UI2`)。タスクトレイ方式の結果はまだ含めていません。
 
 ## 判定方法について
 
