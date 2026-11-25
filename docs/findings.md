@@ -181,5 +181,5 @@ BD ドライブが WPD に出ないのは期待どおりですが、メディア
 |---|---|
 | 新方式で光学ドライブ・フロッピーを外す判定を、ボリュームの ID が `STORAGE\Volume\` で始まるかから、ボリュームの devnode が `GUID_DEVINTERFACE_CDROM` / `FLOPPY` を登録しているかに変えた | 2 台目の A: (フロッピー)、G:、I: (光学ドライブ) が引き続き `not a disk volume (optical/floppy)` で外れるか |
 | 32 ビット整数のプロパティ (取り外しポリシーなど) を `UINT32` と `INT32` の両方で受け付け、インターフェイスの有無を一覧の取得で判定するようにした | 新方式の結果が、上の表と変わらないか |
-| タスクトレイ方式 (`SelectDrivesSafeRemoval`) を追加した | `-f letters` の `Safe` 列が、タスクトレイの一覧と一致するか ([safe-removal-flow.md](safe-removal-flow.md)) |
+| タスクトレイ方式 (`SelectDrivesSafeRemoval`) を追加し、`-f code` を `UI3` 形式にした | `-f letters` の `Safe` 列 (`-f code` では 15 文字目) が、新方式の結果とタスクトレイの一覧に一致するか ([safe-removal-flow.md](safe-removal-flow.md)) |
 | 最小改修案 (`SelectDrivesLegacyMinimal`) を追加し、`-f code` を `UI2` 形式にした | 2 台目で H:、J:、K: が抽出され、ボリュームのハンドルからバス種別が取れるか ([legacy-minimal-flow.md](legacy-minimal-flow.md)) |

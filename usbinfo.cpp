@@ -2422,9 +2422,11 @@ static std::wstring lsusb(bool tree)
 // ---------------------------------------------------------------------------
 // 目コピ用の短いコード (-f code) とその検証 (--decode)
 //
-//   UI2 N03 A3                         ヘッダー: 形式バージョン、ドライブ行の数、チェック値
-//   E: FNY S GU NN SYN YU 2E           ドライブ行
-//   |  ||| | || || ||| || +- CRC-8 (空白と : を除いた文字列に対する 16 進 2 桁)
+//   UI3 N03 A3                         ヘッダー: 形式バージョン、ドライブ行の数、チェック値
+//   E: FNY S GU NN SYN YU SN 2E        ドライブ行
+//   |  ||| | || || ||| || || +- CRC-8 (空白と : を除いた文字列に対する 16 進 2 桁)
+//   |  ||| | || || ||| || |+--- (UI3) ディスク自身の DEVPKEY_Device_SafeRemovalRequired (Y/N/-)
+//   |  ||| | || || ||| || +---- (UI3) タスクトレイ方式の結果 (S=抽出 R=安全な取り外しが要るノードなし U=USB でない ほかは codeReason と同じ)
 //   |  ||| | || || ||| |+--- (UI2) ディスクのバス種別 (U=Usb A=Sata/Ata N=Nvme S=Scsi/Sas D=Sd/Mmc R=RAID O=その他 -)
 //   |  ||| | || || ||| +---- (UI2) 最小改修案で抽出 (Y/N)
 //   |  ||| | || || ||+------ USB デバイスが PC 本体のコンテナー内か (Y/N/-)
@@ -2440,7 +2442,7 @@ static std::wstring lsusb(bool tree)
 //   |  +----------------- GetDriveType (R/F/C/W/M/U)
 //   +-------------------- ドライブレター
 //
-// UI1 (最後の 2 文字の組がない形式) も --decode で読める。行の長さで見分ける。
+// UI1 (13 文字目以降なし)、UI2 (15 文字目以降なし) も --decode で読める。行の長さで見分ける。
 // シリアル番号、PC 名、ボリューム GUID は含めない。VID:PID は --vidpid のときだけ付ける。
 // ---------------------------------------------------------------------------
 
@@ -2480,6 +2482,7 @@ static wchar_t codeReason(const std::wstring& r)
     if (r == L"disk not found") return L'M';
     if (startsWithI(r, L"removal policy")) return L'P';
     if (startsWithI(r, L"internal USB")) return L'I';
+    if (r == L"no node requires safe removal") return L'R';   // タスクトレイ方式だけの理由
     return L'X';
 }
 
@@ -2514,11 +2517,12 @@ static std::wstring codeReport(const Node& arr, bool withVidPid)
         for (wchar_t c : body) a += (char)c;
         return body + fmt(L" %02X\n", crc8(codeNormalize(a)));
     };
-    std::wstring o = seal(fmt(L"UI2 N%02zu", arr.kids.size()));
+    std::wstring o = seal(fmt(L"UI3 N%02zu", arr.kids.size()));
     for (const Node& r : arr.kids) {
         const Node* d = r.find(L"newDetail");
         const Node* l = r.find(L"legacyDetail");
         const Node* m = r.find(L"legacyMinimalDetail");
+        const Node* sd = r.find(L"safeRemovalDetail");
         auto val = [](const Node* p, const wchar_t* k) { const Node* n = p ? p->find(k) : nullptr; return n ? n->val : std::wstring(); };
 
         std::wstring dt = val(&r, L"driveType");
@@ -2535,6 +2539,8 @@ static std::wstring codeReport(const Node& arr, bool withVidPid)
                                 policy, codeBool(d, L"usbCapRemovable"), codeBool(d, L"usbInLocalMachineContainer"));
         // UI2 で追加: 最小改修案で抽出 (Y/N) とバス種別
         line += fmt(L" %c%c", val(&r, L"legacyMinimal") == L"selected" ? L'Y' : L'N', codeBusType(val(m, L"busType")));
+        // UI3 で追加: タスクトレイ方式の結果 (理由) と、ディスク自身の SafeRemovalRequired
+        line += fmt(L" %c%c", codeReason(val(sd, L"result")), codeBool(sd, L"diskSafeRemovalRequired"));
         if (withVidPid) {
             std::wstring vp = val(d, L"usbVidPid");
             line += vp.size() == 9 ? L" " + vp : L" ----:----";
@@ -2575,6 +2581,7 @@ static int decodeCodes(const wchar_t* file)
     static const char* const kDisk = "U=USBSTOR|S=SCSI|O=other|-=none";
     static const char* const kPol = "N=ExpectNoRemoval|O=ExpectOrderlyRemoval|S=ExpectSurpriseRemoval|-=n/a";
     static const char* const kBus = "U=Usb|A=Sata/Ata|N=Nvme|S=Scsi/Sas|D=Sd/Mmc|R=RAID|O=other|-=n/a";
+    static const char* const kSafe = "S=selected|U=not USB|R=no node requires safe removal|V=not a disk volume|E=device number failed|K=not FILE_DEVICE_DISK|M=disk not found|X=other";
 
     std::string o;
     int lineNo = 0, bad = 0, drives = 0, expected = -1;
@@ -2597,23 +2604,24 @@ static int decodeCodes(const wchar_t* file)
         bool hexOk = isxdigit((unsigned char)n[n.size() - 2]) && isxdigit((unsigned char)n[n.size() - 1]);
         if (!hexOk || sscanf_s(n.c_str() + n.size() - 2, "%2x", &given) != 1 || crc8(body) != given) { fail("checksum mismatch, reread this line"); continue; }
 
-        if ((body.rfind("UI1N", 0) == 0 || body.rfind("UI2N", 0) == 0) && body.size() == 6 &&
+        if ((body.rfind("UI1N", 0) == 0 || body.rfind("UI2N", 0) == 0 || body.rfind("UI3N", 0) == 0) && body.size() == 6 &&
             isdigit((unsigned char)body[4]) && isdigit((unsigned char)body[5])) {
             expected = atoi(body.c_str() + 4);
             continue;
         }
-        // 行の長さで形式を見分ける。UI1: 12 (VID:PID 付きは 20)、UI2: 14 (VID:PID 付きは 22)
-        const bool v2 = body.size() == 14 || body.size() == 22;
+        // 行の長さで形式を見分ける。UI1: 12 (VID:PID 付きは 20)、UI2: 14 (同 22)、UI3: 16 (同 24)
+        const bool v3 = body.size() == 16 || body.size() == 24;
+        const bool v2 = v3 || body.size() == 14 || body.size() == 22;
         if (body.size() != 12 && body.size() != 20 && !v2) { fail("wrong length"); continue; }
-        const size_t fields = v2 ? 13 : 11;
+        const size_t fields = v3 ? 15 : v2 ? 13 : 11;
         const size_t vidpidAt = fields + 1;
-        const char* tables[] = { kType, kYN, kYN, kReason, kVol, kDisk, kTri, kTri, kPol, kTri, kTri, kYN, kBus };
-        const char* names[13] = {};
+        const char* tables[] = { kType, kYN, kYN, kReason, kVol, kDisk, kTri, kTri, kPol, kTri, kTri, kYN, kBus, kSafe, kTri };
+        const char* names[15] = {};
         bool ok = body[0] >= 'A' && body[0] <= 'Z';
         for (size_t i = 0; ok && i < fields; ++i) {
             const char* name = codeName(body[i + 1], tables[i]);
             if (!name) { ok = false; break; }
-            static std::string keep[13];
+            static std::string keep[15];
             keep[i] = name;
             names[i] = keep[i].c_str();
         }
@@ -2625,10 +2633,11 @@ static int decodeCodes(const wchar_t* file)
                   body[0], names[0], names[1], names[2], diff, names[3], names[4], names[5], names[6], names[7], names[8], names[9], names[10]);
         o += m;
         if (v2) { o += " minimal="; o += names[11]; o += " bus="; o += names[12]; }
+        if (v3) { o += " safe="; o += names[13]; o += " diskSafeRemoval="; o += names[14]; }
         if (body.size() == vidpidAt + 8) o += " vidpid=" + body.substr(vidpidAt, 4) + ":" + body.substr(vidpidAt + 4, 4);
         o += "\n";
     }
-    if (expected < 0) { o += "NG header line (UI1 Nnn / UI2 Nnn) is missing\n"; ++bad; }
+    if (expected < 0) { o += "NG header line (UIn Nnn) is missing\n"; ++bad; }
     else if (expected != drives) { char m[96]; sprintf_s(m, "NG drive lines: header says %d, valid lines %d\n", expected, drives); o += m; ++bad; }
     o += bad ? "RESULT: NG, reread the lines above\n" : "RESULT: OK\n";
     fputs(o.c_str(), stdout);
